@@ -425,27 +425,28 @@
     if (el && el.matches && el.matches(TEXT_BOX)) enablePredictive(el);
   }, true);
 
-  // ---- Bottom tab bar in the DM inbox ----------------------------------------
-  // The real app keeps its tab bar in the inbox; Instagram's mobile site hides it.
-  // Whenever the site's own bar is on screen we save an exact copy of it (same
-  // markup, styles, icons, badge and spacing), plus each tab's icon in its
-  // selected and unselected state. On the inbox we put that copy back, with every
-  // tab shown unselected except Messages.
+  // ---- Bottom tab bar -------------------------------------------------------
+  // One bar of our own, shown wherever Instagram shows its bar and also in the DM
+  // inbox (where the site hides it but the app doesn't). It uses Instagram's own
+  // icons, spaced evenly. Instagram's bar stays in place but invisible, so its
+  // icons, badges and selected states keep updating and we mirror them live.
+  // Because the same bar stays on screen between tabs, switching never flickers.
 
-  const NAV_KEY = 'unreel-nav';
-  let savedNav = (() => {
-    try { return JSON.parse(localStorage.getItem(NAV_KEY)) || null; } catch (_) { return null; }
-  })();
-  // Instagram never shows a real selected Messages icon; drop any bad copy saved
-  // by an earlier version (it was the unselected icon caught mid page-change).
-  if (savedNav && savedNav.icons) {
-    for (const href of Object.keys(savedNav.icons)) {
-      if (href.startsWith('/direct')) delete savedNav.icons[href].on;
-    }
-  }
+  const NAV_KEY = 'unreel-nav-v2';
+  let savedNav = null;
+  let savedJSON = '';
+  try {
+    savedJSON = localStorage.getItem(NAV_KEY) || '';
+    savedNav = savedJSON ? JSON.parse(savedJSON) : null;
+  } catch (_) { savedNav = null; }
 
-  // The site's bottom bar: the full-width, short block around its Home/Search links.
+  const isSelected = (href, path) =>
+    href.startsWith('/direct') ? path.startsWith('/direct') : href === '/' ? path === '/' : path.startsWith(href);
+
+  // Instagram's own bottom bar: the full-width, short block around its Home/Search links.
   function findSiteNav() {
+    const marked = document.querySelector('[data-unreel-sitenav]');
+    if (marked && marked.getBoundingClientRect().height > 0) return marked;
     for (const a of document.querySelectorAll('a[href="/"], a[href="/explore/"]')) {
       if (a.closest('#unreel-tabbar')) continue;
       const r = a.getBoundingClientRect();
@@ -456,37 +457,83 @@
         if (er.width >= window.innerWidth * 0.95 && er.height < 110) nav = el;
         else if (nav) break;
       }
-      if (nav) return nav;
+      if (nav) {
+        nav.setAttribute('data-unreel-sitenav', '');
+        return nav;
+      }
     }
     return null;
   }
 
+  // The tabs we show: the site's links, minus Reels and anything hidden.
+  const siteNavLinks = (nav) => [...nav.querySelectorAll('a[href]')].filter((a) =>
+    a.getAttribute('href') !== '/reels/' && getComputedStyle(a).display !== 'none');
+
+  // Remember each tab's icon in its selected and unselected state.
   function captureSiteNav(nav) {
     const path = location.pathname;
-    // While opening DMs the URL changes a moment before the site's bar disappears;
-    // copying it then would save the wrong icons, so only copy outside DMs.
+    // Opening DMs changes the URL a moment before the site's bar disappears;
+    // copying it then would save the wrong states, so only copy outside DMs.
     if (path.startsWith('/direct')) return;
-    const icons = (savedNav && savedNav.icons) || {};
-    for (const a of nav.querySelectorAll('a[href]')) {
+    const old = (savedNav && savedNav.items) || [];
+    const items = siteNavLinks(nav).map((a) => {
       const href = a.getAttribute('href');
-      const selected = href === '/' ? path === '/' : path.startsWith(href);
-      icons[href] = icons[href] || {};
-      icons[href][selected ? 'on' : 'off'] = a.innerHTML;
-    }
-    const r = nav.getBoundingClientRect();
-    const html = nav.outerHTML;
-    if (savedNav && savedNav.html === html && savedNav.height === r.height) return;
-    savedNav = { html, height: r.height, icons };
-    try { localStorage.setItem(NAV_KEY, JSON.stringify(savedNav)); } catch (_) {}
+      const prev = old.find((i) => i.href === href) || {};
+      const sel = !href.startsWith('/direct') && isSelected(href, path);
+      return { href, on: sel ? a.innerHTML : prev.on, off: sel ? prev.off : a.innerHTML };
+    });
+    if (!items.length) return;
+    const cs = getComputedStyle(nav);
+    const next = {
+      height: nav.getBoundingClientRect().height,
+      background: cs.backgroundColor,
+      borderTop: cs.borderTopWidth !== '0px' ? cs.borderTop : '',
+      items,
+    };
+    const json = JSON.stringify(next);
+    if (json === savedJSON) return;
+    savedNav = next;
+    savedJSON = json;
+    try { localStorage.setItem(NAV_KEY, json); } catch (_) {}
+  }
+
+  // Instagram's site never shows a selected Messages icon, so make one the way
+  // the app draws it: the paper plane filled in, with its fold line cut out.
+  function selectedMessagesIcon(html) {
+    const holder = document.createElement('div');
+    holder.innerHTML = html;
+    const svg = holder.querySelector('svg');
+    if (!svg) return html;
+    svg.querySelectorAll('polygon, path').forEach((shape) => shape.setAttribute('fill', 'currentColor'));
+    svg.querySelectorAll('line').forEach((line) => line.setAttribute('stroke', lastTheme || 'rgb(12,16,20)'));
+    return holder.innerHTML;
   }
 
   const onInbox = () => /^\/direct\/(inbox|requests|general)/.test(location.pathname) ||
     /^\/direct\/?$/.test(location.pathname);
 
+  // A tab you just tapped shows as selected right away, before the page changes.
+  let pendingHref = null;
+  let pendingUntil = 0;
+
+  function iconsToShow(nav) {
+    const path = location.pathname;
+    if (pendingHref && (Date.now() > pendingUntil || isSelected(pendingHref, path))) pendingHref = null;
+    const target = pendingHref || null;
+    return savedNav.items.map((item) => {
+      const sel = target ? item.href === target : isSelected(item.href, path);
+      const live = !target && nav && [...nav.querySelectorAll('a[href]')].find((a) => a.getAttribute('href') === item.href);
+      let html;
+      if (live && !(item.href.startsWith('/direct') && sel)) html = live.innerHTML;   // exact and current
+      else if (item.href.startsWith('/direct')) html = sel ? selectedMessagesIcon(item.off || item.on) : (item.off || item.on);
+      else html = sel ? (item.on || item.off) : (item.off || item.on);
+      return { href: item.href, html: html || '' };
+    });
+  }
+
   const onInboxContent = () => document.querySelectorAll('a[href^="/direct/t/"]').length > 0;
 
   function navigateTo(href) {
-    haptic('selection');
     const before = location.pathname;
     history.pushState({}, '', href);
     window.dispatchEvent(new PopStateEvent('popstate', { state: {} }));
@@ -499,73 +546,59 @@
     }, 900);
   }
 
-  // Instagram's site never shows a selected Messages icon, so make one the way
-  // the app draws it: the paper plane filled in, with its fold line cut out.
-  function selectedMessagesIcon(html) {
-    const holder = document.createElement('div');
-    holder.innerHTML = html;
-    const svg = holder.querySelector('svg');
-    if (!svg) return html;
-    const bg = lastTheme || 'rgb(12,16,20)';
-    svg.querySelectorAll('polygon, path').forEach((shape) => {
-      if (shape.getAttribute('fill') === 'none' || shape.getAttribute('stroke')) {
-        shape.setAttribute('fill', 'currentColor');
-      }
-    });
-    svg.querySelectorAll('line').forEach((line) => {
-      line.setAttribute('stroke', bg);
-    });
-    return holder.innerHTML;
+  function onTabTap(e) {
+    const tab = e.target.closest('a.unreel-tab');
+    if (!tab) return;
+    e.preventDefault();
+    e.stopPropagation();
+    const href = tab.getAttribute('href');
+    if (isSelected(href, location.pathname)) return;
+    pendingHref = href;
+    pendingUntil = Date.now() + 1500;
+    lastSig = '';
+    updateTabBar();
+    // Tap Instagram's own (invisible) tab so its router navigates normally.
+    const nav = findSiteNav();
+    const live = nav && [...nav.querySelectorAll('a[href]')].find((a) => a.getAttribute('href') === href);
+    if (live) fire(live); else navigateTo(href);
   }
 
-  function buildTabBar() {
-    const wrap = document.createElement('div');
-    wrap.id = 'unreel-tabbar';
-    wrap.style.height = `${savedNav.height}px`;
-    wrap.style.background = lastTheme || '';   // in case the site paints its bar color on a parent
-    wrap.innerHTML = savedNav.html;
-    const copy = wrap.firstElementChild;
-    if (copy) copy.setAttribute('data-unreel-navcopy', '');
+  let lastSig = '';
+  function updateTabBar(capture = false) {
+    const nav = findSiteNav();
+    if (nav && (capture || !savedNav)) captureSiteNav(nav);   // copying is done on the slower pass
 
-    // Show every tab unselected, except Messages.
-    for (const a of wrap.querySelectorAll('a[href]')) {
-      const href = a.getAttribute('href');
-      const icon = savedNav.icons[href] || {};
-      const isMessages = href.startsWith('/direct');
-      let html = isMessages ? (icon.on || icon.off) : (icon.off || icon.on);
-      if (isMessages && !icon.on && html) html = selectedMessagesIcon(html);
-      if (html) a.innerHTML = html;
-    }
-
-    wrap.addEventListener('click', (e) => {
-      const a = e.target.closest('a[href]');
-      if (!a) return;
-      e.preventDefault();
-      e.stopPropagation();
-      const href = a.getAttribute('href');
-      if (!href.startsWith('/direct')) navigateTo(href);
-    }, true);
-    return wrap;
-  }
-
-  let builtFrom = null;
-  function updateTabBar() {
-    const siteNav = findSiteNav();
-    if (siteNav) captureSiteNav(siteNav);
-
-    const want = onInbox() && !siteNav && !!savedNav;
+    const want = !!(savedNav && savedNav.items && savedNav.items.length && (nav || onInbox()));
+    document.documentElement.classList.toggle('unreel-tabbar-on', want);
+    document.documentElement.classList.toggle('unreel-has-tabbar', want && !nav);   // make room only where the site doesn't
     let bar = document.getElementById('unreel-tabbar');
-    document.documentElement.classList.toggle('unreel-has-tabbar', want);
     if (!want) {
       if (bar) bar.remove();
+      lastSig = '';
       return;
     }
-    if (bar && builtFrom === savedNav.html) return;
-    if (bar) bar.remove();
-    bar = buildTabBar();
-    builtFrom = savedNav.html;
+    if (!bar) {
+      bar = document.createElement('div');
+      bar.id = 'unreel-tabbar';
+      bar.addEventListener('click', onTabTap, true);
+      document.body.appendChild(bar);
+      lastSig = '';
+    }
+
+    const icons = iconsToShow(nav);
+    const sig = savedNav.height + '|' + icons.map((i) => i.href + i.html).join('|');
+    if (sig === lastSig) return;
+    lastSig = sig;
+
+    const bg = savedNav.background && !/rgba\(.*,\s*0\)$/.test(savedNav.background) && savedNav.background !== 'transparent'
+      ? savedNav.background : (lastTheme || 'rgb(12,16,20)');
+    const [r, g, b] = (bg.match(/[\d.]+/g) || [12, 16, 20]).map(Number);
+    bar.style.height = `${savedNav.height}px`;
+    bar.style.background = bg;
+    bar.style.borderTop = savedNav.borderTop || '';
+    bar.style.color = (0.299 * r + 0.587 * g + 0.114 * b) < 128 ? '#f5f5f5' : '#000';
     document.documentElement.style.setProperty('--unreel-tabbar-h', `${savedNav.height}px`);
-    document.body.appendChild(bar);
+    bar.innerHTML = icons.map((i) => `<a class="unreel-tab" href="${i.href}">${i.html}</a>`).join('');
   }
 
   // ---- Actions the app can trigger (Home Screen quick actions) ----------------
@@ -590,9 +623,12 @@
     // Explore with the grid hidden: no endless loading spinner. Hiding it also stops
     // Instagram from fetching more grid posts in the background.
     '.unreel-explore [role="progressbar"], .unreel-explore [data-visualcompletion="loading-state"], .unreel-explore svg[aria-label^="Loading"] { display: none !important; }',
-    // Inbox tab bar: an exact copy of the site's bar, pinned to the bottom.
-    '#unreel-tabbar { position: fixed; left: 0; right: 0; bottom: 0; z-index: 2147483000; }',
-    '#unreel-tabbar > [data-unreel-navcopy] { position: absolute !important; inset: 0 !important; width: 100% !important; height: 100% !important; transform: none !important; }',
+    // Our tab bar: Instagram's icons in equal-width columns, pinned to the bottom.
+    '#unreel-tabbar { position: fixed; left: 0; right: 0; bottom: 0; z-index: 2147483000; display: flex; align-items: stretch; }',
+    '.unreel-tab { flex: 1 1 0; display: flex; align-items: center; justify-content: center; color: inherit; text-decoration: none; }',
+    '.unreel-tab > * { pointer-events: none; }',
+    // Instagram's own bar stays laid out (so it keeps updating) but invisible.
+    '.unreel-tabbar-on [data-unreel-sitenav] { opacity: 0 !important; pointer-events: none !important; }',
     '.unreel-has-tabbar body { padding-bottom: var(--unreel-tabbar-h, 50px) !important; }',
     // Feel like an app, not a web page: no grey tap flashes, no text-selection/callout menus.
     '* { -webkit-tap-highlight-color: transparent; }',
@@ -649,8 +685,8 @@
 
     document.querySelectorAll(TEXT_BOX).forEach(enablePredictive);
 
-    // Swap in the inbox tab bar in the same frame the site's own bar disappears.
-    if (onInbox() || document.getElementById('unreel-tabbar')) updateTabBar();
+    // Keep the tab bar in step with the page in the same frame (no flicker).
+    updateTabBar();
 
 
     // Fallback in case a navigation slipped past the history hooks.
@@ -661,7 +697,7 @@
   // (that was making scrolling and the keyboard animation stutter).
   function slowSweep() {
     reportTheme();
-    updateTabBar();
+    updateTabBar(true);
 
     const video = document.querySelector('video') ? viewerVideo() : null;
     if (video) {
