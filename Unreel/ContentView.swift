@@ -8,26 +8,13 @@ struct ContentView: View {
     @State private var showSetup = false
     @State private var pendingURL: URL?
 
-    private var showsNativeComposer: Bool {
-        settings.nativeComposer && store.inChat && !store.webComposerMode
-    }
-
     var body: some View {
         ZStack {
             // Fills the status-bar and home-indicator areas with Instagram's own background color.
             Color(uiColor: store.pageColor).ignoresSafeArea()
 
-            VStack(spacing: 0) {
-                InstagramWebView(webView: store.webView)
-
-                // Native message bar in chats; it rides the keyboard like the app's.
-                if showsNativeComposer {
-                    ComposerBar(store: store)
-                        .transition(.move(edge: .bottom).combined(with: .opacity))
-                }
-            }
-            .animation(.easeOut(duration: 0.2), value: showsNativeComposer)
-            .opacity(store.hasLoaded ? 1 : 0)
+            InstagramWebView(webView: store.webView)
+                .opacity(store.hasLoaded ? 1 : 0)
             .animation(.easeOut(duration: 0.25), value: store.hasLoaded)
         }
         .onAppear {

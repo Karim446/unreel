@@ -5,7 +5,7 @@
   window.__unreelLoaded = true;
 
   const cfg = Object.assign(
-    { blockReelsTab: true, blockFeedReels: true, allowDMReels: true, hideExploreGrid: true, nativeComposer: true },
+    { blockReelsTab: true, blockFeedReels: true, allowDMReels: true, hideExploreGrid: true },
     window.__UNREEL__ || {}
   );
   paintBackground(window.__UNREEL_BG__);   // dark from the very first frame
@@ -42,9 +42,8 @@
     return null;
   }
 
-  // Tell the app which page we're on (it shows the native message bar in chats).
+  // Tell the app which page we're on (it closes the keyboard when you leave a chat).
   const reportRoute = () => window.webkit?.messageHandlers?.route?.postMessage(location.pathname);
-  let webComposerMode = false;   // true while Instagram's own message box is shown instead
 
   let spaNavigated = false;   // true once Instagram has navigated in-page (so history.back() is cheap)
 
@@ -53,7 +52,6 @@
     if (path === lastPath) return;
     lastPath = path;
     spaNavigated = true;
-    webComposerMode = false;   // leaving a chat always returns to the native message bar
     reportRoute();
     const target = decide(path, from);
     if (target && target !== path) location.replace(target);
@@ -427,98 +425,6 @@
     if (el && el.matches && el.matches(TEXT_BOX)) enablePredictive(el);
   }, true);
 
-  // ---- Native message bar support ---------------------------------------------
-  // In chats the app shows its own native message bar. Instagram's box is moved
-  // off-screen (not removed, so it still works), and the app sends text and
-  // photos through it.
-
-  const inChat = () => location.pathname.startsWith('/direct/t/');
-  const nativeComposerActive = () => cfg.nativeComposer && inChat() && !webComposerMode;
-
-  function findEditor() {
-    return document.querySelector(
-      '[contenteditable="true"][role="textbox"], div[contenteditable="true"][aria-label*="essage"], textarea[placeholder^="Message"]'
-    );
-  }
-  const editorText = (el) => (el ? (el.tagName === 'TEXTAREA' ? el.value : el.textContent) : '');
-
-  // The whole bar around the editor: the widest, short ancestor at the bottom.
-  function markComposer() {
-    const editor = findEditor();
-    if (!editor) return null;
-    let bar = null;
-    for (let el = editor.parentElement, i = 0; el && el !== document.body && i < 12; el = el.parentElement, i++) {
-      const r = el.getBoundingClientRect();
-      if (r.width >= window.innerWidth * 0.9 && r.height > 0 && r.height < 170) bar = el;
-      else if (bar) break;
-    }
-    if (bar && !bar.hasAttribute('data-unreel-composer')) {
-      document.querySelectorAll('[data-unreel-composer]').forEach((el) => el.removeAttribute('data-unreel-composer'));
-      bar.setAttribute('data-unreel-composer', '');
-    }
-    return bar;
-  }
-
-  function updateComposer() {
-    const active = nativeComposerActive();
-    document.documentElement.classList.toggle('unreel-native-composer', active);
-    if (active || (cfg.nativeComposer && inChat())) markComposer();
-  }
-
-  function pressEnter(el) {
-    const opts = { key: 'Enter', code: 'Enter', keyCode: 13, which: 13, bubbles: true, cancelable: true };
-    el.dispatchEvent(new KeyboardEvent('keydown', opts));
-    el.dispatchEvent(new KeyboardEvent('keypress', opts));
-    el.dispatchEvent(new KeyboardEvent('keyup', opts));
-  }
-
-  function findSendButton() {
-    const scope = document.querySelector('[data-unreel-composer]') || document;
-    for (const b of scope.querySelectorAll('[role="button"], button')) {
-      if (b.textContent.trim() === 'Send' || b.querySelector('svg[aria-label="Send"]')) return b;
-    }
-    return null;
-  }
-
-  async function insertText(el, text) {
-    el.focus({ preventScroll: true });   // no keyboard: it isn't a real tap
-    if (el.tagName === 'TEXTAREA') {
-      Object.getOwnPropertyDescriptor(HTMLTextAreaElement.prototype, 'value').set.call(el, text);
-      el.dispatchEvent(new Event('input', { bubbles: true }));
-      return;
-    }
-    document.execCommand('selectAll', false);
-    document.execCommand('insertText', false, text);
-    await sleep(40);
-    if (!editorText(el).trim()) {
-      // Fallback: paste, which rich-text editors always handle.
-      try {
-        const dt = new DataTransfer();
-        dt.setData('text/plain', text);
-        el.dispatchEvent(new ClipboardEvent('paste', { clipboardData: dt, bubbles: true, cancelable: true }));
-      } catch (_) {}
-      await sleep(40);
-    }
-  }
-
-  function composerFileInput() {
-    const scope = document.querySelector('[data-unreel-composer]');
-    return (scope && scope.querySelector('input[type="file"]')) ||
-      document.querySelector('input[type="file"][accept*="image"]') ||
-      document.querySelector('input[type="file"]');
-  }
-
-  // Swiping through a chat dismisses the native keyboard, like the app.
-  let lastScrollPing = 0;
-  window.addEventListener('touchmove', () => {
-    if (!document.documentElement.classList.contains('unreel-native-composer')) return;
-    const now = Date.now();
-    if (now - lastScrollPing < 400) return;
-    lastScrollPing = now;
-    window.webkit?.messageHandlers?.chatScroll?.postMessage(1);
-  }, { capture: true, passive: true });
-
-
   // ---- Actions the app can trigger (Home Screen quick actions) ----------------
 
   window.__unreel = {
@@ -532,66 +438,6 @@
       attempt();
     },
 
-    // Send a text message through Instagram's own box. Resolves true once sent.
-    async sendMessage(text) {
-      const el = findEditor();
-      if (!el) return false;
-      await insertText(el, text);
-      if (!editorText(el).trim()) return false;
-      await sleep(60);
-      const button = findSendButton();
-      if (button) fire(button); else pressEnter(el);
-      for (let i = 0; i < 15; i++) {
-        await sleep(100);
-        if (!editorText(findEditor() || el).trim()) { el.blur(); return true; }
-      }
-      pressEnter(findEditor() || el);   // second try
-      await sleep(400);
-      const sent = !editorText(findEditor() || el).trim();
-      el.blur();
-      return sent;
-    },
-
-    // Attach photos (base64 JPEGs from the app) through Instagram's upload input.
-    async sendFiles(files) {
-      markComposer();
-      const input = composerFileInput();
-      if (!input) return false;
-      const dt = new DataTransfer();
-      for (const f of files) {
-        const bin = atob(f.b64);
-        const bytes = new Uint8Array(bin.length);
-        for (let i = 0; i < bin.length; i++) bytes[i] = bin.charCodeAt(i);
-        dt.items.add(new File([bytes], f.name, { type: f.type }));
-      }
-      input.files = dt.files;
-      input.dispatchEvent(new Event('input', { bubbles: true }));
-      input.dispatchEvent(new Event('change', { bubbles: true }));
-      // Some versions show a preview that still needs Send.
-      for (let i = 0; i < 15; i++) {
-        await sleep(200);
-        const button = findSendButton();
-        if (button) { fire(button); break; }
-      }
-      return true;
-    },
-
-    // Bring back Instagram's own box (for voice messages, stickers, etc.).
-    showWebComposer(kind) {
-      webComposerMode = true;
-      updateComposer();
-      const labels = { voice: /voice|audio|record|microphone/i, sticker: /sticker|gif/i };
-      const re = labels[kind];
-      if (!re) return;
-      const scope = document.querySelector('[data-unreel-composer]') || document;
-      const icon = [...scope.querySelectorAll('svg[aria-label]')].find((svg) => re.test(svg.getAttribute('aria-label')));
-      if (icon) setTimeout(() => fire(icon), 80);
-    },
-
-    useNativeComposer() {
-      webComposerMode = false;
-      updateComposer();
-    },
   };
 
   // Static hiding via CSS.
@@ -601,8 +447,6 @@
     // Explore with the grid hidden: no endless loading spinner. Hiding it also stops
     // Instagram from fetching more grid posts in the background.
     '.unreel-explore [role="progressbar"], .unreel-explore [data-visualcompletion="loading-state"], .unreel-explore svg[aria-label^="Loading"] { display: none !important; }',
-    // Native message bar: park Instagram's box off-screen (still usable by script).
-    '.unreel-native-composer [data-unreel-composer] { position: fixed !important; left: 0 !important; right: 0 !important; bottom: -600px !important; opacity: 0 !important; pointer-events: none !important; }',
     // Feel like an app, not a web page: no grey tap flashes, no text-selection/callout menus.
     '* { -webkit-tap-highlight-color: transparent; }',
     'body { -webkit-touch-callout: none; -webkit-user-select: none; user-select: none; }',
@@ -658,7 +502,6 @@
 
     document.querySelectorAll(TEXT_BOX).forEach(enablePredictive);
 
-    updateComposer();
 
     // Fallback in case a navigation slipped past the history hooks.
     check(lastPath);

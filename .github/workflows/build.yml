@@ -22,6 +22,7 @@ jobs:
           xcodebuild -project Unreel.xcodeproj -target Unreel \
             -configuration Release -sdk iphoneos \
             SYMROOT="$PWD/build" \
+            CURRENT_PROJECT_VERSION="${{ github.run_number }}" \
             CODE_SIGNING_ALLOWED=NO CODE_SIGNING_REQUIRED=NO CODE_SIGN_IDENTITY="" \
             build
 

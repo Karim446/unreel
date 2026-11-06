@@ -10,7 +10,6 @@ Instagram without the Reels feed. Unreel shows instagram.com in a native iOS app
 - No web-style arrows/"Done" bar above the keyboard.
 - Reopens where you left off (except reels and login screens).
 - Long-press the app icon for Messages, New Post, and Filters.
-- Native message bar in chats (iOS text box with emoji suggestions, camera, photo picker). Mic, stickers, and + switch to Instagram's own box until you leave the chat. Toggle in Filters.
 
 A Shortcuts automation sends taps on the real Instagram icon to Unreel.
 

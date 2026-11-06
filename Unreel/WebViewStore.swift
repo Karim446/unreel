@@ -19,8 +19,6 @@ final class WebViewStore: NSObject, ObservableObject, WKNavigationDelegate, WKUI
     @Published var pageColor: UIColor
     /// Current Instagram path, reported by filter.js.
     @Published var path = "/"
-    /// True while Instagram's own message box is shown instead of the native bar.
-    @Published var webComposerMode = false
 
     var inChat: Bool { path.hasPrefix("/direct/t/") }
 
@@ -51,10 +49,15 @@ final class WebViewStore: NSObject, ObservableObject, WKNavigationDelegate, WKUI
         webView.configuration.userContentController.add(self, name: "theme")
         webView.configuration.userContentController.add(self, name: "haptic")
         webView.configuration.userContentController.add(self, name: "route")
-        webView.configuration.userContentController.add(self, name: "chatScroll")
         webView.hideKeyboardAccessoryBar()
         webView.customUserAgent = Self.safariUA
-        webView.allowsBackForwardNavigationGestures = true   // edge swipe = back
+        // WebKit's built-in back swipe shows a snapshot of the previous page, and for
+        // Instagram's in-page navigation that snapshot is often missing, leaving a
+        // white page behind your finger. Use our own swipe instead (see handleEdgePan).
+        webView.allowsBackForwardNavigationGestures = false
+        let edgePan = UIScreenEdgePanGestureRecognizer(target: self, action: #selector(handleEdgePan(_:)))
+        edgePan.edges = .left
+        webView.addGestureRecognizer(edgePan)
         webView.allowsLinkPreview = false                    // no Safari-style peek on long-press
         webView.navigationDelegate = self
         webView.uiDelegate = self
@@ -118,39 +121,6 @@ final class WebViewStore: NSObject, ObservableObject, WKNavigationDelegate, WKUI
         UserDefaults.standard.set(url, forKey: resumeKey)
     }
 
-    // MARK: Native message bar
-
-    /// Sends text through Instagram's message box. Returns false if it couldn't.
-    func sendMessage(_ text: String) async -> Bool {
-        let result = try? await webView.callAsyncJavaScript(
-            "return await window.__unreel.sendMessage(text);",
-            arguments: ["text": text], in: nil, in: .page)
-        return (result as? Bool) ?? false
-    }
-
-    /// Sends JPEG photos through Instagram's upload input.
-    func sendImages(_ images: [Data]) async -> Bool {
-        guard !images.isEmpty else { return false }
-        let files: [[String: String]] = images.enumerated().map { i, data in
-            ["name": "photo\(i + 1).jpg", "type": "image/jpeg", "b64": data.base64EncodedString()]
-        }
-        let result = try? await webView.callAsyncJavaScript(
-            "return await window.__unreel.sendFiles(files);",
-            arguments: ["files": files], in: nil, in: .page)
-        return (result as? Bool) ?? false
-    }
-
-    /// Shows Instagram's own message box (for voice messages, stickers, and more).
-    func showWebComposer(_ kind: String) {
-        webComposerMode = true
-        webView.evaluateJavaScript("window.__unreel && window.__unreel.showWebComposer('\(kind)')")
-    }
-
-    func useNativeComposer() {
-        webComposerMode = false
-        webView.evaluateJavaScript("window.__unreel && window.__unreel.useNativeComposer()")
-    }
-
     // MARK: Quick actions
 
     func perform(_ action: QuickAction) {
@@ -178,6 +148,49 @@ final class WebViewStore: NSObject, ObservableObject, WKNavigationDelegate, WKUI
 
     @objc private func pullToRefresh() { webView.reload() }
 
+    // MARK: Back swipe
+
+    /// Swipe in from the left edge: the page follows your finger over Instagram's
+    /// dark background, and going far enough (or flicking) goes back.
+    @objc private func handleEdgePan(_ pan: UIScreenEdgePanGestureRecognizer) {
+        guard webView.canGoBack else { return }
+        let width = max(webView.bounds.width, 1)
+        let dx = max(0, pan.translation(in: webView).x)
+
+        switch pan.state {
+        case .began:
+            UIApplication.shared.sendAction(#selector(UIResponder.resignFirstResponder), to: nil, from: nil, for: nil)
+        case .changed:
+            webView.transform = CGAffineTransform(translationX: dx, y: 0)
+            webView.alpha = 1 - (dx / width) * 0.35
+        case .ended:
+            let flick = pan.velocity(in: webView).x > 700
+            if dx > width * 0.35 || flick {
+                Haptics.play("light")
+                UIView.animate(withDuration: 0.18, delay: 0, options: .curveEaseOut) {
+                    self.webView.transform = CGAffineTransform(translationX: width, y: 0)
+                    self.webView.alpha = 0.5
+                } completion: { _ in
+                    self.webView.goBack()
+                    self.webView.transform = .identity
+                    self.webView.alpha = 0
+                    UIView.animate(withDuration: 0.18, delay: 0.05) { self.webView.alpha = 1 }
+                }
+            } else {
+                snapBack()
+            }
+        default:
+            snapBack()
+        }
+    }
+
+    private func snapBack() {
+        UIView.animate(withDuration: 0.2, delay: 0, options: .curveEaseOut) {
+            self.webView.transform = .identity
+            self.webView.alpha = 1
+        }
+    }
+
     private func finishLoading() {
         refreshControl.endRefreshing()
         jsAfterLoad.forEach { webView.evaluateJavaScript($0) }
@@ -198,13 +211,16 @@ final class WebViewStore: NSObject, ObservableObject, WKNavigationDelegate, WKUI
         }
         if message.name == "route", let newPath = message.body as? String {
             if newPath != path {
+                let wasInChat = inChat
                 path = newPath
-                webComposerMode = false
+                if wasInChat && !inChat {
+                    // Leaving a chat: close the keyboard instantly so the page doesn't
+                    // re-layout through the whole keyboard animation.
+                    UIView.performWithoutAnimation {
+                        UIApplication.shared.sendAction(#selector(UIResponder.resignFirstResponder), to: nil, from: nil, for: nil)
+                    }
+                }
             }
-            return
-        }
-        if message.name == "chatScroll" {
-            UIApplication.shared.sendAction(#selector(UIResponder.resignFirstResponder), to: nil, from: nil, for: nil)
             return
         }
         guard message.name == "theme", let css = message.body as? String,
