@@ -19,25 +19,39 @@ struct UnreelApp: App {
 final class AppRouter: ObservableObject {
     static let shared = AppRouter()
     @Published var showSettings = false
+    /// A quick action waiting to be carried out by ContentView.
+    @Published var pendingAction: QuickAction?
+}
+
+enum QuickAction: String {
+    case filters, messages, newPost
 }
 
 // MARK: - Home Screen quick action ("Filters" when you long-press the icon)
 
 enum QuickActions {
-    static let filtersType = "filters"
-
     @MainActor static func install() {
+        func item(_ action: QuickAction, _ title: String, _ symbol: String) -> UIApplicationShortcutItem {
+            UIApplicationShortcutItem(type: action.rawValue, localizedTitle: title, localizedSubtitle: nil,
+                                      icon: UIApplicationShortcutIcon(systemImageName: symbol))
+        }
+        // Shown top to bottom when you long-press the app icon.
         UIApplication.shared.shortcutItems = [
-            UIApplicationShortcutItem(type: filtersType,
-                                      localizedTitle: "Filters",
-                                      localizedSubtitle: nil,
-                                      icon: UIApplicationShortcutIcon(systemImageName: "slider.horizontal.3"))
+            item(.messages, "Messages", "paperplane"),
+            item(.newPost, "New Post", "plus.app"),
+            item(.filters, "Filters", "slider.horizontal.3"),
         ]
     }
 
     static func handle(_ item: UIApplicationShortcutItem) {
-        guard item.type == filtersType else { return }
-        Task { @MainActor in AppRouter.shared.showSettings = true }
+        guard let action = QuickAction(rawValue: item.type) else { return }
+        Task { @MainActor in
+            if action == .filters {
+                AppRouter.shared.showSettings = true
+            } else {
+                AppRouter.shared.pendingAction = action
+            }
+        }
     }
 }
 

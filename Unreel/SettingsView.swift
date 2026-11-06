@@ -15,7 +15,9 @@ struct SettingsView: View {
                     Text("DM Reels open one at a time. Swiping to another Reel sends you back to the chat.")
                 }
                 Section {
-                    Toggle("Block Explore", isOn: $settings.blockExplore)
+                    Toggle("Hide the Explore grid", isOn: $settings.hideExploreGrid)
+                } footer: {
+                    Text("Search still works, so you can find people and accounts.")
                 }
                 Section {
                     NavigationLink("Set up Instagram redirect") { SetupGuideView() }

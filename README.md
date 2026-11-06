@@ -5,7 +5,11 @@ Instagram without the Reels feed. Unreel shows instagram.com in a native iOS app
 - The Reels tab is hidden, and visiting /reels/ redirects to your DMs.
 - Reels are removed from the home feed.
 - Reels your friends send in DMs still play, one at a time. Swiping to another Reel sends you back to the chat.
-- Explore can optionally be blocked as well, from the Filters screen.
+- The Explore grid is hidden while search keeps working (toggle in Filters).
+- Haptic taps when you like a post, double-tap a photo, switch tabs, or swipe a reel closed.
+- No web-style arrows/"Done" bar above the keyboard.
+- Reopens where you left off (except reels and login screens).
+- Long-press the app icon for Messages, New Post, and Filters.
 
 A Shortcuts automation sends taps on the real Instagram icon to Unreel.
 
@@ -45,7 +49,7 @@ Replace `Unreel/Assets.xcassets/AppIcon.appiconset/AppIcon.png` with any 1024×1
 
 ## Hidden settings
 
-There is no on-screen bar. Open Filters by shaking the phone, or by long-pressing the Unreel icon and choosing Filters.
+There is no on-screen bar. Open Filters by shaking the phone, or by long-pressing the app icon and choosing Filters. The same menu has Messages (jumps to your inbox) and New Post (opens Instagram's create menu).
 
 ## First launch
 

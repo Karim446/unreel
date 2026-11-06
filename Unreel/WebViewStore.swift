@@ -1,3 +1,4 @@
+import AVFoundation
 import UIKit
 import WebKit
 
@@ -20,8 +21,13 @@ final class WebViewStore: NSObject, ObservableObject, WKNavigationDelegate, WKUI
     private let filterSource: String
     private var appliedConfig: String?
     private let refreshControl = UIRefreshControl()
+    private var urlObserver: NSKeyValueObservation?
+    private var jsAfterLoad: [String] = []
 
     override init() {
+        // Play reel audio even when the ring/silent switch is on silent, like the real app.
+        try? AVAudioSession.sharedInstance().setCategory(.playback, mode: .default)
+
         let config = WKWebViewConfiguration()
         config.websiteDataStore = .default()          // keeps you logged in
         config.allowsInlineMediaPlayback = true
@@ -37,6 +43,8 @@ final class WebViewStore: NSObject, ObservableObject, WKNavigationDelegate, WKUI
         super.init()
 
         webView.configuration.userContentController.add(self, name: "theme")
+        webView.configuration.userContentController.add(self, name: "haptic")
+        webView.hideKeyboardAccessoryBar()
         webView.customUserAgent = Self.safariUA
         webView.allowsBackForwardNavigationGestures = true   // edge swipe = back
         webView.allowsLinkPreview = false                    // no Safari-style peek on long-press
@@ -53,6 +61,11 @@ final class WebViewStore: NSObject, ObservableObject, WKNavigationDelegate, WKUI
         // Native pull-to-refresh.
         refreshControl.addTarget(self, action: #selector(pullToRefresh), for: .valueChanged)
         webView.scrollView.refreshControl = refreshControl
+
+        // Remember where you are so the next launch resumes there.
+        urlObserver = webView.observe(\.url, options: [.new]) { wv, _ in
+            Task { @MainActor in Self.rememberLocation(wv.url) }
+        }
 
         // Never leave the screen blank if the first load stalls.
         DispatchQueue.main.asyncAfter(deadline: .now() + 8) { [weak self] in self?.hasLoaded = true }
@@ -74,6 +87,40 @@ final class WebViewStore: NSObject, ObservableObject, WKNavigationDelegate, WKUI
 
     func loadHome() { webView.load(URLRequest(url: Self.home)) }
 
+    // MARK: Resume where you left off
+
+    private static let resumeKey = "resumeURL"
+
+    /// Loads the last page you were on, or the feed if there isn't one.
+    func loadLastLocation() {
+        let saved = UserDefaults.standard.url(forKey: Self.resumeKey)
+        webView.load(URLRequest(url: saved ?? Self.home))
+    }
+
+    private static func rememberLocation(_ url: URL?) {
+        guard let url, let host = url.host?.lowercased(), host.hasSuffix("instagram.com") else { return }
+        let path = url.path
+        // Don't resume into reels, login, or account-check screens.
+        let skip = ["/reel", "/reels", "/accounts/", "/challenge", "/stories/"]
+        guard !skip.contains(where: { path.hasPrefix($0) }) else { return }
+        UserDefaults.standard.set(url, forKey: resumeKey)
+    }
+
+    // MARK: Quick actions
+
+    func perform(_ action: QuickAction) {
+        switch action {
+        case .filters:
+            break   // handled by the router (opens the settings sheet)
+        case .messages:
+            webView.load(URLRequest(url: URL(string: "direct/inbox/", relativeTo: Self.home)!))
+        case .newPost:
+            // Go to the feed, then tap Instagram's own "New post" button once it has rendered.
+            jsAfterLoad.append("window.__unreel && window.__unreel.newPost()")
+            loadHome()
+        }
+    }
+
     /// Handles unreel:// links, e.g. unreel://inbox from the Shortcuts automation.
     func open(_ url: URL) {
         let target: String
@@ -88,6 +135,8 @@ final class WebViewStore: NSObject, ObservableObject, WKNavigationDelegate, WKUI
 
     private func finishLoading() {
         refreshControl.endRefreshing()
+        jsAfterLoad.forEach { webView.evaluateJavaScript($0) }
+        jsAfterLoad.removeAll()
         webView.scrollView.pinchGestureRecognizer?.isEnabled = false
         if !hasLoaded { hasLoaded = true }
     }
@@ -99,6 +148,9 @@ final class WebViewStore: NSObject, ObservableObject, WKNavigationDelegate, WKUI
     // MARK: Page color
 
     func userContentController(_ controller: WKUserContentController, didReceive message: WKScriptMessage) {
+        if message.name == "haptic", let style = message.body as? String {
+            return Haptics.play(style)
+        }
         guard message.name == "theme", let css = message.body as? String,
               let color = Self.parseCSSColor(css) else { return }
         applyPageColor(color)

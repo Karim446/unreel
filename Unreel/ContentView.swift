@@ -22,8 +22,20 @@ struct ContentView: View {
             didLoad = true
             QuickActions.install()
             store.apply(settings, reloadIfChanged: false)
-            if let url = pendingURL { store.open(url) } else { store.loadHome() }
+            if let url = pendingURL {
+                store.open(url)
+            } else if let action = router.pendingAction {
+                router.pendingAction = nil
+                store.perform(action)
+            } else {
+                store.loadLastLocation()
+            }
             if !settings.hasSeenSetup { showSetup = true }
+        }
+        .onReceive(router.$pendingAction) { action in
+            guard didLoad, let action else { return }
+            router.pendingAction = nil
+            store.perform(action)
         }
         .onOpenURL { url in
             if didLoad { store.open(url) } else { pendingURL = url }
