@@ -17,6 +17,8 @@ targets:
       properties:
         # Let the app draw at 120 Hz on ProMotion iPhones (apps are capped at 60 Hz without this).
         CADisableMinimumFrameDurationOnPhone: true
+        NSCameraUsageDescription: Take a photo to send in a chat.
+        NSMicrophoneUsageDescription: Record voice messages in chats.
         CFBundleURLTypes:
           - CFBundleURLName: unreel
             CFBundleURLSchemes: [unreel]

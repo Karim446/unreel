@@ -20,6 +20,11 @@ struct SettingsView: View {
                     Text("Search still works, so you can find people and accounts.")
                 }
                 Section {
+                    Toggle("Native message bar", isOn: $settings.nativeComposer)
+                } footer: {
+                    Text("Uses the iPhone's own text box in chats, with emoji suggestions and a smooth keyboard. Turn off to use Instagram's web box.")
+                }
+                Section {
                     NavigationLink("Set up Instagram redirect") { SetupGuideView() }
                 } footer: {
                     Text("To get back here, shake your phone or long-press the app icon and choose Filters.")

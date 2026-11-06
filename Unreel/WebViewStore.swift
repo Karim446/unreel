@@ -17,6 +17,12 @@ final class WebViewStore: NSObject, ObservableObject, WKNavigationDelegate, WKUI
     @Published var hasLoaded = false
     /// Instagram's actual page background, used to color the status bar and home-indicator areas.
     @Published var pageColor: UIColor
+    /// Current Instagram path, reported by filter.js.
+    @Published var path = "/"
+    /// True while Instagram's own message box is shown instead of the native bar.
+    @Published var webComposerMode = false
+
+    var inChat: Bool { path.hasPrefix("/direct/t/") }
 
     private let filterSource: String
     private var appliedConfig: String?
@@ -44,6 +50,8 @@ final class WebViewStore: NSObject, ObservableObject, WKNavigationDelegate, WKUI
 
         webView.configuration.userContentController.add(self, name: "theme")
         webView.configuration.userContentController.add(self, name: "haptic")
+        webView.configuration.userContentController.add(self, name: "route")
+        webView.configuration.userContentController.add(self, name: "chatScroll")
         webView.hideKeyboardAccessoryBar()
         webView.customUserAgent = Self.safariUA
         webView.allowsBackForwardNavigationGestures = true   // edge swipe = back
@@ -110,6 +118,39 @@ final class WebViewStore: NSObject, ObservableObject, WKNavigationDelegate, WKUI
         UserDefaults.standard.set(url, forKey: resumeKey)
     }
 
+    // MARK: Native message bar
+
+    /// Sends text through Instagram's message box. Returns false if it couldn't.
+    func sendMessage(_ text: String) async -> Bool {
+        let result = try? await webView.callAsyncJavaScript(
+            "return await window.__unreel.sendMessage(text);",
+            arguments: ["text": text], in: nil, in: .page)
+        return (result as? Bool) ?? false
+    }
+
+    /// Sends JPEG photos through Instagram's upload input.
+    func sendImages(_ images: [Data]) async -> Bool {
+        guard !images.isEmpty else { return false }
+        let files: [[String: String]] = images.enumerated().map { i, data in
+            ["name": "photo\(i + 1).jpg", "type": "image/jpeg", "b64": data.base64EncodedString()]
+        }
+        let result = try? await webView.callAsyncJavaScript(
+            "return await window.__unreel.sendFiles(files);",
+            arguments: ["files": files], in: nil, in: .page)
+        return (result as? Bool) ?? false
+    }
+
+    /// Shows Instagram's own message box (for voice messages, stickers, and more).
+    func showWebComposer(_ kind: String) {
+        webComposerMode = true
+        webView.evaluateJavaScript("window.__unreel && window.__unreel.showWebComposer('\(kind)')")
+    }
+
+    func useNativeComposer() {
+        webComposerMode = false
+        webView.evaluateJavaScript("window.__unreel && window.__unreel.useNativeComposer()")
+    }
+
     // MARK: Quick actions
 
     func perform(_ action: QuickAction) {
@@ -154,6 +195,17 @@ final class WebViewStore: NSObject, ObservableObject, WKNavigationDelegate, WKUI
     func userContentController(_ controller: WKUserContentController, didReceive message: WKScriptMessage) {
         if message.name == "haptic", let style = message.body as? String {
             return Haptics.play(style)
+        }
+        if message.name == "route", let newPath = message.body as? String {
+            if newPath != path {
+                path = newPath
+                webComposerMode = false
+            }
+            return
+        }
+        if message.name == "chatScroll" {
+            UIApplication.shared.sendAction(#selector(UIResponder.resignFirstResponder), to: nil, from: nil, for: nil)
+            return
         }
         guard message.name == "theme", let css = message.body as? String,
               let color = Self.parseCSSColor(css) else { return }
