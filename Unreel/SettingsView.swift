@@ -19,6 +19,8 @@ struct SettingsView: View {
                 }
                 Section {
                     NavigationLink("Set up Instagram redirect") { SetupGuideView() }
+                } footer: {
+                    Text("To get back here, shake your phone or long-press the app icon and choose Filters.")
                 }
             }
             .navigationTitle("Filters")

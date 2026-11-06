@@ -39,10 +39,19 @@ open Unreel.xcodeproj
 
 Builds signed with a free Apple ID expire after 7 days, so you re-run from Xcode to renew. A paid developer account ($99/yr) extends that to a year and allows TestFlight.
 
+## App icon
+
+Replace `Unreel/Assets.xcassets/AppIcon.appiconset/AppIcon.png` with any 1024×1024 PNG with no transparency, keeping the same file name. Push, download the new IPA, and reinstall it through SideStore. Your login is kept.
+
+## Hidden settings
+
+There is no on-screen bar. Open Filters by shaking the phone, or by long-pressing the Unreel icon and choosing Filters.
+
 ## First launch
 
 1. Log in to Instagram inside Unreel. The session persists between launches.
-2. Follow the in-app redirect guide to set up the Shortcuts automation (Instagram "Is Opened" → Open App: Unreel → Run Immediately).
+2. Follow the in-app redirect guide to set up the Shortcuts automation (Instagram "Is Opened" → Open URLs: `unreel://inbox` → Run Immediately). Tapping an Instagram notification then lands you in your DM inbox.
+3. To hide the real app but keep its notifications, long-press it and choose Remove App → **Remove from Home Screen**. It stays in the App Library. Don't use Hide or a Screen Time limit: both silence notifications.
 
 ## How it works
 

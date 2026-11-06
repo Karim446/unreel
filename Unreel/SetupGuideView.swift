@@ -8,14 +8,15 @@ struct SetupGuideView: View {
         "Tap + (New Automation), then choose App.",
         "Choose Instagram, check \"Is Opened\", and select \"Run Immediately\".",
         "Tap Next, then New Blank Automation.",
-        "Add the \"Open App\" action and pick Unreel.",
-        "Tap Done. Opening Instagram now lands you in Unreel.",
+        "Add the \"Open URLs\" action and enter unreel://inbox",
+        "Tap Done. Opening the real Instagram (or tapping one of its notifications) now lands you in your DMs here.",
+        "Optional: long-press the real Instagram icon → Remove App → Remove from Home Screen. Don't choose Hide, which silences its notifications.",
     ]
 
     var body: some View {
         List {
             Section {
-                Text("Keep the Instagram icon where it is. This automation sends every tap on it to Unreel instead.")
+                Text("This automation sends every launch of the real Instagram app to Unreel instead. Instagram stays installed so its notifications keep working.")
                     .foregroundStyle(.secondary)
             }
             Section("Steps") {
@@ -25,6 +26,10 @@ struct SetupGuideView: View {
                         Text(step)
                     }
                 }
+            }
+            Section {
+                Text("Settings are hidden. Shake your phone, or long-press the Unreel icon and choose Filters.")
+                    .foregroundStyle(.secondary)
             }
             Section {
                 Button("Open Shortcuts") {

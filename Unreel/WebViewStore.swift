@@ -13,17 +13,18 @@ final class WebViewStore: NSObject, ObservableObject, WKNavigationDelegate, WKUI
     private static let allowedHosts = ["instagram.com", "facebook.com", "fbcdn.net", "cdninstagram.com", "meta.com"]
 
     let webView: WKWebView
-    @Published var canGoBack = false
+    @Published var hasLoaded = false
 
     private let filterSource: String
     private var appliedConfig: String?
-    private var backObserver: NSKeyValueObservation?
+    private let refreshControl = UIRefreshControl()
 
     override init() {
         let config = WKWebViewConfiguration()
         config.websiteDataStore = .default()          // keeps you logged in
         config.allowsInlineMediaPlayback = true
         config.mediaTypesRequiringUserActionForPlayback = []
+        config.ignoresViewportScaleLimits = false     // respect no-zoom viewport
         webView = WKWebView(frame: .zero, configuration: config)
 
         filterSource = Bundle.main.url(forResource: "filter", withExtension: "js")
@@ -32,16 +33,26 @@ final class WebViewStore: NSObject, ObservableObject, WKNavigationDelegate, WKUI
         super.init()
 
         webView.customUserAgent = Self.safariUA
-        webView.allowsBackForwardNavigationGestures = true
+        webView.allowsBackForwardNavigationGestures = true   // edge swipe = back
+        webView.allowsLinkPreview = false                    // no Safari-style peek on long-press
         webView.navigationDelegate = self
         webView.uiDelegate = self
         #if DEBUG
         if #available(iOS 16.4, *) { webView.isInspectable = true }
         #endif
 
-        backObserver = webView.observe(\.canGoBack, options: [.new]) { [weak self] wv, _ in
-            Task { @MainActor in self?.canGoBack = wv.canGoBack }
-        }
+        // Blend with the page instead of flashing white.
+        webView.isOpaque = false
+        webView.backgroundColor = .systemBackground
+        webView.scrollView.backgroundColor = .systemBackground
+        webView.underPageBackgroundColor = .systemBackground
+
+        // Native pull-to-refresh.
+        refreshControl.addTarget(self, action: #selector(pullToRefresh), for: .valueChanged)
+        webView.scrollView.refreshControl = refreshControl
+
+        // Never leave the screen blank if the first load stalls.
+        DispatchQueue.main.asyncAfter(deadline: .now() + 8) { [weak self] in self?.hasLoaded = true }
     }
 
     /// Installs the filter script with current settings. Reloads only if settings changed.
@@ -60,7 +71,23 @@ final class WebViewStore: NSObject, ObservableObject, WKNavigationDelegate, WKUI
 
     func loadHome() { webView.load(URLRequest(url: Self.home)) }
 
-    func goBack() { if webView.canGoBack { webView.goBack() } }
+    /// Handles unreel:// links, e.g. unreel://inbox from the Shortcuts automation.
+    func open(_ url: URL) {
+        let target: String
+        switch url.host?.lowercased() {
+        case "inbox", "direct", "dm": target = "direct/inbox/"
+        default: target = ""
+        }
+        webView.load(URLRequest(url: URL(string: target, relativeTo: Self.home)!))
+    }
+
+    @objc private func pullToRefresh() { webView.reload() }
+
+    private func finishLoading() {
+        refreshControl.endRefreshing()
+        webView.scrollView.pinchGestureRecognizer?.isEnabled = false
+        if !hasLoaded { hasLoaded = true }
+    }
 
     private static func isAllowed(_ host: String) -> Bool {
         allowedHosts.contains { host == $0 || host.hasSuffix("." + $0) }
@@ -87,6 +114,10 @@ final class WebViewStore: NSObject, ObservableObject, WKNavigationDelegate, WKUI
         }
         decisionHandler(.allow)
     }
+
+    func webView(_ webView: WKWebView, didFinish navigation: WKNavigation!) { finishLoading() }
+    func webView(_ webView: WKWebView, didFail navigation: WKNavigation!, withError error: Error) { finishLoading() }
+    func webView(_ webView: WKWebView, didFailProvisionalNavigation navigation: WKNavigation!, withError error: Error) { finishLoading() }
 
     func webViewWebContentProcessDidTerminate(_ webView: WKWebView) {
         webView.reload()

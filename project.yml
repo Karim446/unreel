@@ -12,12 +12,19 @@ targets:
         excludes: ["Resources/**"]
       - path: Unreel/Resources
         buildPhase: resources
+    info:
+      path: Unreel/Info.plist
+      properties:
+        CFBundleURLTypes:
+          - CFBundleURLName: unreel
+            CFBundleURLSchemes: [unreel]
     settings:
       base:
         PRODUCT_BUNDLE_IDENTIFIER: com.yourname.unreel
         SWIFT_VERSION: "5.0"
         GENERATE_INFOPLIST_FILE: YES
-        INFOPLIST_KEY_CFBundleDisplayName: Unreel
+        INFOPLIST_KEY_CFBundleDisplayName: Instagram
+        ASSETCATALOG_COMPILER_APPICON_NAME: AppIcon
         INFOPLIST_KEY_UILaunchScreen_Generation: YES
         INFOPLIST_KEY_UISupportedInterfaceOrientations: UIInterfaceOrientationPortrait
         TARGETED_DEVICE_FAMILY: "1"

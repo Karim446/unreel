@@ -72,7 +72,12 @@
 
   // Static hiding via CSS.
   const css = [
+    // Hide "Get the app" prompts.
     'a[href*="apps.apple.com"], a[href*="itunes.apple.com"] { display: none !important; }',
+    // Feel like an app, not a web page: no grey tap flashes, no text-selection/callout menus.
+    '* { -webkit-tap-highlight-color: transparent; }',
+    'body { -webkit-touch-callout: none; -webkit-user-select: none; user-select: none; }',
+    'input, textarea, [contenteditable="true"], [contenteditable="true"] * { -webkit-user-select: text; user-select: text; -webkit-touch-callout: default; }',
   ];
   if (cfg.blockReelsTab) css.push('a[href="/reels/"], a[href^="/reels/?"] { display: none !important; }');
   if (cfg.blockExplore) css.push('a[href="/explore/"] { display: none !important; }');
@@ -105,6 +110,9 @@
       });
     }
 
+    // Instagram can rewrite <head>; keep zoom locked.
+    lockViewport();
+
     // Fallback in case a navigation slipped past the history hooks.
     check(lastPath);
   }
@@ -119,8 +127,21 @@
     });
   }
 
+  // Disable pinch/double-tap zoom.
+  function lockViewport() {
+    let meta = document.querySelector('meta[name="viewport"]');
+    if (!meta) {
+      meta = document.createElement('meta');
+      meta.name = 'viewport';
+      (document.head || document.documentElement).appendChild(meta);
+    }
+    const want = 'width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no';
+    if (meta.content !== want) meta.content = want;
+  }
+
   function start() {
     addStyle();
+    lockViewport();
     sweep();
     new MutationObserver(scheduleSweep).observe(document.documentElement, { childList: true, subtree: true });
   }

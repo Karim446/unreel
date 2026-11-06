@@ -3,37 +3,32 @@ import SwiftUI
 struct ContentView: View {
     @EnvironmentObject private var settings: FilterSettings
     @StateObject private var store = WebViewStore()
+    @ObservedObject private var router = AppRouter.shared
     @State private var didLoad = false
-    @State private var showSettings = false
     @State private var showSetup = false
+    @State private var pendingURL: URL?
 
     var body: some View {
-        VStack(spacing: 0) {
-            HStack {
-                Button { store.goBack() } label: { Image(systemName: "chevron.left") }
-                    .disabled(!store.canGoBack)
-                Button { store.loadHome() } label: { Image(systemName: "house") }
-                Spacer()
-                Text("Unreel").font(.subheadline.weight(.semibold))
-                Spacer()
-                Button { showSettings = true } label: { Image(systemName: "slider.horizontal.3") }
-            }
-            .padding(.horizontal, 16)
-            .frame(height: 36)
-
-            Divider()
+        ZStack {
+            // Matches Instagram's white/black background so there's no flash or seam.
+            Color(.systemBackground).ignoresSafeArea()
 
             InstagramWebView(webView: store.webView)
-                .ignoresSafeArea(edges: .bottom)
+                .opacity(store.hasLoaded ? 1 : 0)
+                .animation(.easeOut(duration: 0.25), value: store.hasLoaded)
         }
         .onAppear {
             guard !didLoad else { return }
             didLoad = true
+            QuickActions.install()
             store.apply(settings, reloadIfChanged: false)
-            store.loadHome()
+            if let url = pendingURL { store.open(url) } else { store.loadHome() }
             if !settings.hasSeenSetup { showSetup = true }
         }
-        .sheet(isPresented: $showSettings, onDismiss: {
+        .onOpenURL { url in
+            if didLoad { store.open(url) } else { pendingURL = url }
+        }
+        .sheet(isPresented: $router.showSettings, onDismiss: {
             store.apply(settings, reloadIfChanged: true)
         }) {
             SettingsView()
