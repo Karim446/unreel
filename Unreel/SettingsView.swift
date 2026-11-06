@@ -16,8 +16,11 @@ struct SettingsView: View {
                     Toggle("Block the Reels tab", isOn: $settings.blockReelsTab)
                     Toggle("Block Reels in the feed", isOn: $settings.blockFeedReels)
                     Toggle("Allow Reels sent in DMs", isOn: $settings.allowDMReels)
+                        .disabled(!settings.blockReelsTab)
                 } footer: {
-                    Text("DM Reels open one at a time. Swiping to another Reel sends you back to the chat.")
+                    Text(settings.blockReelsTab
+                         ? "With the Reels tab blocked, Reels only play when opened from a DM, one at a time; swiping to another sends you back to the chat. \"Block Reels in the feed\" hides every video post on the home feed."
+                         : "The Reels tab is back and works normally. \"Block Reels in the feed\" still hides every video post on the home feed.")
                 }
                 Section {
                     Toggle("Hide the Explore grid", isOn: $settings.hideExploreGrid)
@@ -25,7 +28,7 @@ struct SettingsView: View {
                 } footer: {
                     Text("Search still works with the Explore grid hidden. Hiding ads removes sponsored posts from the feed and skips sponsored Stories.")
                 }
-                Section("Extras") {
+                Section {
                     NavigationLink("App Icon") { AppIconPicker() }
                     NavigationLink("Bio Fonts") {
                         FancyTextView {
@@ -33,6 +36,10 @@ struct SettingsView: View {
                             openEditProfile()
                         }
                     }
+                } header: {
+                    Text("Extras")
+                } footer: {
+                    Text("Peek: long-press a chat in your inbox to read it without sending \"Seen\". Tap \"Mark as read\" in the chat when you're ready.")
                 }
                 Section {
                     NavigationLink("Set up Instagram redirect") { SetupGuideView() }

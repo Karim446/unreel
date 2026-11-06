@@ -8,6 +8,88 @@
     { blockReelsTab: true, blockFeedReels: true, allowDMReels: true, hideExploreGrid: true, hideAds: true },
     window.__UNREEL__ || {}
   );
+
+  // ---- Peek: read a chat without sending "Seen" ----------------------------------
+  // Long-press a chat in the inbox to open it in Peek mode. While peeking, the
+  // signals Instagram's page sends to mark a chat as read are held back, so the
+  // other person doesn't see "Seen". These wrappers are installed before
+  // Instagram's own code runs, so every way the page talks to the server passes
+  // through them: normal requests (fetch / XHR) and the live connection
+  // (WebSocket) that chats use.
+  const PEEK_KEY = 'unreel-peek-threads';
+  const peekThreads = new Set((() => {
+    try { return JSON.parse(sessionStorage.getItem(PEEK_KEY)) || []; } catch (_) { return []; }
+  })());
+  // A peek was requested and the chat is still opening. Kept in session storage
+  // too, in case opening the chat reloads the page.
+  let peekPendingUntil = Number(sessionStorage.getItem('unreel-peek-pending')) || 0;
+  const setPeekPending = (until) => {
+    peekPendingUntil = until;
+    try { sessionStorage.setItem('unreel-peek-pending', String(until)); } catch (_) {}
+  };
+  const threadId = () => (location.pathname.match(/^\/direct\/t\/([^/]+)/) || [])[1] || null;
+  const savePeeks = () => { try { sessionStorage.setItem(PEEK_KEY, JSON.stringify([...peekThreads])); } catch (_) {} };
+  const peeking = () => Date.now() < peekPendingUntil || (threadId() && peekThreads.has(threadId()));
+
+  // What a "mark as read" message looks like, in any of the ways the page sends it.
+  const READ_SIGNAL = /mark_?(thread_?)?(as_?)?(read|seen)|markthread(as)?read|markasread|markseen|read_?receipt|\/seen\/|"mark_read"|"seen"\s*:\s*true|thread_?read_?state|"label"\s*:\s*"21"/i;
+  const textOf = (body) => {
+    if (body == null) return '';
+    if (typeof body === 'string') return body;
+    try {
+      if (body instanceof URLSearchParams) return body.toString();
+      if (body instanceof FormData) return [...body.entries()].map(([k, v]) => `${k}=${typeof v === 'string' ? v : ''}`).join('&');
+      if (body instanceof ArrayBuffer) return new TextDecoder('utf-8', { fatal: false }).decode(body);
+      if (ArrayBuffer.isView(body)) return new TextDecoder('utf-8', { fatal: false }).decode(body);
+    } catch (_) {}
+    return '';
+  };
+  const isReadSignal = (url, body) => READ_SIGNAL.test(String(url || '')) || READ_SIGNAL.test(textOf(body));
+  let heldBack = 0;   // how many read signals were held back (shown in the banner)
+
+  const realFetch = window.fetch;
+  window.fetch = function (input, init) {
+    if (peeking()) {
+      const url = typeof input === 'string' ? input : input && input.url;
+      if (isReadSignal(url, init && init.body)) {
+        heldBack++;
+        return Promise.resolve(new Response('{"status":"ok"}', { status: 200, headers: { 'content-type': 'application/json' } }));
+      }
+    }
+    return realFetch.apply(this, arguments);
+  };
+
+  const realOpen = XMLHttpRequest.prototype.open;
+  const realSend = XMLHttpRequest.prototype.send;
+  XMLHttpRequest.prototype.open = function (method, url) {
+    this.__unreelUrl = url;
+    return realOpen.apply(this, arguments);
+  };
+  XMLHttpRequest.prototype.send = function (body) {
+    if (peeking() && isReadSignal(this.__unreelUrl, body)) {
+      heldBack++;
+      // Pretend it went through, so the page doesn't retry.
+      Object.defineProperty(this, 'readyState', { value: 4, configurable: true });
+      Object.defineProperty(this, 'status', { value: 200, configurable: true });
+      Object.defineProperty(this, 'responseText', { value: '{"status":"ok"}', configurable: true });
+      setTimeout(() => {
+        this.dispatchEvent(new Event('readystatechange'));
+        this.dispatchEvent(new Event('load'));
+        this.dispatchEvent(new Event('loadend'));
+      }, 0);
+      return;
+    }
+    return realSend.apply(this, arguments);
+  };
+
+  if (window.WebSocket) {
+    const realWsSend = WebSocket.prototype.send;
+    WebSocket.prototype.send = function (data) {
+      if (peeking() && isReadSignal('', data)) { heldBack++; return; }
+      return realWsSend.apply(this, arguments);
+    };
+  }
+
   const INBOX = '/direct/inbox/';
   const haptic = (style) => window.webkit?.messageHandlers?.haptic?.postMessage(style);
 
@@ -25,7 +107,9 @@
   // Paint the page with Instagram's last known background (for this mode) from
   // the very first frame, so it never flashes the wrong color.
   paintBackground(window.__UNREEL_BG__);
-  const reelsRestricted = cfg.blockReelsTab || cfg.blockFeedReels;
+  // Blocking Reels (the tab, swiping from reel to reel, opening reels outside DMs)
+  // follows "Block the Reels tab". "Block Reels in the feed" only hides feed posts.
+  const reelsRestricted = cfg.blockReelsTab;
 
   let lastPath = location.pathname;
   let allowedReel = null;   // the one reel opened from a DM
@@ -353,8 +437,77 @@
     return here ? here[1] : null;
   }
 
-  async function likeRequest(shortcode) {
-    const id = shortcodeToId(shortcode);
+  // ---- Reading Instagram's own page data (React) ----
+  // The page's buttons and posts carry their data (like the post's media id) in
+  // React properties attached to the elements. Reading them is the most reliable
+  // way to know which post a heart belongs to, even in the DM reel viewer where
+  // there's no link to the reel.
+  const reactKey = (el, prefix) => el && Object.keys(el).find((k) => k.startsWith(prefix));
+  const reactProps = (el) => { const k = reactKey(el, '__reactProps$'); return k ? el[k] : null; };
+  const reactFiber = (el) => { const k = reactKey(el, '__reactFiber$'); return k ? el[k] : null; };
+
+  const MEDIA_KEYS = /^(media_?id|mediaId|post_?id|postId|clip_?id|clipId)$/i;
+  function findMediaId(obj, depth, seen) {
+    if (!obj || typeof obj !== 'object' || depth > 3 || seen.has(obj)) return null;
+    seen.add(obj);
+    let fallback = null;
+    for (const k of Object.keys(obj)) {
+      let v;
+      try { v = obj[k]; } catch (_) { continue; }
+      if (MEDIA_KEYS.test(k) && /^\d{8,25}(_\d+)?$/.test(String(v))) return String(v).split('_')[0];
+      if (/^(code|shortcode)$/i.test(k) && typeof v === 'string' && /^[A-Za-z0-9_-]{8,}$/.test(v)) fallback = shortcodeToId(v);
+      // A media object: has a pk/id plus media fields.
+      if ((k === 'pk' || k === 'id') && /^\d{8,25}(_\d+)?$/.test(String(v)) &&
+          ('media_type' in obj || 'code' in obj || 'like_count' in obj || 'has_liked' in obj)) {
+        return String(v).split('_')[0];
+      }
+    }
+    if (fallback) return fallback;
+    for (const k of Object.keys(obj)) {
+      if (k === 'children' || k.startsWith('_') || k === 'ref') continue;
+      let v;
+      try { v = obj[k]; } catch (_) { continue; }
+      if (v && typeof v === 'object' && !(v instanceof Node)) {
+        const found = findMediaId(v, depth + 1, seen);
+        if (found) return found;
+      }
+    }
+    return null;
+  }
+
+  // Only look a limited way up, so we find this element's own post and never a
+  // neighbouring one further up the page.
+  function mediaIdFromReact(el, levels = 25) {
+    let fiber = reactFiber(el);
+    const seen = new WeakSet();
+    for (let i = 0; fiber && i < levels; i++, fiber = fiber.return) {
+      const id = findMediaId(fiber.memoizedProps, 0, seen);
+      if (id) return id;
+    }
+    return null;
+  }
+
+  // Run the heart button's own tap handler, exactly as a real tap would.
+  function pressViaReact(el) {
+    for (let node = el, i = 0; node && i < 8; node = node.parentElement, i++) {
+      const r = node.getBoundingClientRect();
+      if (i > 0 && (r.width > 80 || r.height > 80)) break;   // only the button, never the video around it
+      const props = reactProps(node);
+      const handler = props && (props.onClick || props.onPress || props.onPointerUp);
+      if (typeof handler !== 'function') continue;
+      const native = new MouseEvent('click', { bubbles: true, cancelable: true, view: window });
+      const evt = {
+        type: 'click', target: el, currentTarget: node, nativeEvent: native, button: 0, buttons: 0,
+        clientX: 0, clientY: 0, pointerType: 'touch', detail: 1, timeStamp: performance.now(),
+        preventDefault() {}, stopPropagation() {}, isDefaultPrevented: () => false,
+        isPropagationStopped: () => false, persist() {},
+      };
+      try { handler(evt); return true; } catch (_) { return false; }
+    }
+    return false;
+  }
+
+  async function likeRequest(id) {
     const csrf = (document.cookie.match(/(?:^|;\s*)csrftoken=([^;]+)/) || [])[1];
     if (!id || !csrf) return false;
     try {
@@ -377,7 +530,12 @@
     }
   }
 
-  const isLiked = (icon) => icon && icon.getAttribute('aria-label') === 'Unlike';
+  const isLiked = (icon) => !!icon && icon.getAttribute('aria-label') === 'Unlike';
+
+  const waitFor = async (test, ms) => {
+    for (let t = 0; t < ms; t += 100) { if (test()) return true; await sleep(100); }
+    return test();
+  };
 
   async function likeMedia(media) {
     const icon = likeIconFor(media);
@@ -387,25 +545,18 @@
     haptic('medium');
     if (icon && isLiked(icon)) return;   // already liked: just the pop, like the app
 
-    // 1. Send the like itself, so the creator gets it no matter what the page does.
-    const sent = code ? await likeRequest(code) : false;
+    const liked = () => !icon || !icon.isConnected || isLiked(likeIconFor(media));
 
-    // 2. Turn the heart red. Tapping Instagram's button sends the same like again,
-    //    which is harmless: a like can't be counted twice.
-    if (icon && icon.isConnected && !isLiked(icon)) {
-      fire(icon);
-      if (!sent) {
-        // Couldn't send it directly: make sure the button tap registered.
-        for (let el = icon.parentElement, i = 0; el && i < 4; el = el.parentElement, i++) {
-          await sleep(350);
-          const now = likeIconFor(media);
-          if (!icon.isConnected || isLiked(now)) return;
-          const r = el.getBoundingClientRect();
-          if (r.width > 120 || r.height > 120) return;
-          fire(el);
-        }
-      }
-    }
+    // 1. Press the heart through Instagram's own button code (turns it red and
+    //    sends the like the normal way).
+    if (icon && pressViaReact(icon) && await waitFor(liked, 800)) return;
+
+    // 2. Otherwise send the like request directly, for the post this heart belongs to.
+    const id = (icon && mediaIdFromReact(icon)) || mediaIdFromReact(media) || (code && shortcodeToId(code));
+    const sent = id ? await likeRequest(id) : false;
+
+    // 3. Last resort: a simulated tap on the heart.
+    if (!sent && icon && icon.isConnected && !isLiked(icon)) fire(icon);
   }
 
   function showHeart(media) {
@@ -890,8 +1041,10 @@
     const icons = top
       .filter((svg) => svg !== logo && width(svg) <= 40 && svg.getBoundingClientRect().left > logoRight + 30)
       .sort((a, b) => a.getBoundingClientRect().left - b.getBoundingClientRect().left);
-    if (icons.length < 2) return;
-    const plus = icons[icons.length - 2];   // the heart is last; + sits just before it
+    if (icons.length < 2 && !document.querySelector('svg[aria-label="New post"]')) return;
+    // Prefer the + by its label; otherwise by position (the heart is last, + just before it).
+    const labelled = [...document.querySelectorAll('svg[aria-label="New post"], svg[aria-label="Create"]')].find(inHeader);
+    const plus = labelled || icons[icons.length - 2];
     if (plus.getBoundingClientRect().left < window.innerWidth / 2) return;
 
     // The header row: the closest element that holds both the logo and the +.
@@ -903,16 +1056,25 @@
     // just the + button (not the heart next to it).
     let brand = logo;
     while (brand.parentElement && brand.parentElement !== row) brand = brand.parentElement;
-    let newPost = plus;
+    const plusIcon = plus;
+    // Only the + button itself: climb through its small wrappers, never into the
+    // group that also holds the heart.
+    let newPost = plusIcon;
     while (newPost.parentElement && newPost.parentElement !== row &&
-           newPost.parentElement.querySelectorAll('svg').length === 1) {
+           newPost.parentElement.getBoundingClientRect().width <= 56) {
       newPost = newPost.parentElement;
     }
     if (brand === newPost) return;
 
+    // The group on the right that holds the heart: keep it pinned right once the
+    // logo is taken out of the row's flow (otherwise it slides to the left).
+    let actions = plus;
+    while (actions.parentElement && actions.parentElement !== row) actions = actions.parentElement;
+
     row.setAttribute('data-unreel-header', '');
     brand.setAttribute('data-unreel-brand', '');
     newPost.setAttribute('data-unreel-newpost', '');
+    if (actions !== brand && actions !== newPost) actions.setAttribute('data-unreel-actions', '');
   }
 
   // ---- Haptic when double-tapping a message to react ----------------------
@@ -981,52 +1143,80 @@
   const isReelPost = (post) => !!(post.querySelector('video') || post.querySelector(REEL_LINK) ||
     post.querySelector('svg[aria-label="Audio is muted"], svg[aria-label="Audio is playing"], [aria-label="Toggle audio"], svg[aria-label="Clip"], svg[aria-label="Reel"]'));
 
-  // The post's slot in the feed list: the ancestor whose parent holds other posts too.
+  // The post's slot: climb only through wrappers that hold nothing but this post.
+  // (Climbing further could hide neighbouring posts, or the whole feed.)
   function feedSlot(post) {
     let slot = post;
-    while (slot.parentElement && slot.parentElement !== document.body) {
-      const parent = slot.parentElement;
-      if ([...parent.children].filter((c) => c !== slot && c.querySelector && c.querySelector('article')).length) return slot;
-      slot = parent;
+    while (slot.parentElement && slot.parentElement !== document.body && slot.parentElement.childElementCount === 1) {
+      slot = slot.parentElement;
     }
-    return post;
+    return slot;
   }
+
+  // Decisions are remembered per post (by its link), so a post never flips between
+  // hidden and shown. Instagram swaps videos in and out as you scroll, and
+  // re-deciding each time made the feed jump and flicker.
+  const hiddenPosts = new Set();
+  const keptPosts = new Set();
+  const postKey = (post) => {
+    const a = post.querySelector('a[href*="/p/"], a[href*="/reel/"]');
+    const m = a && a.getAttribute('href').match(SHORTCODE);
+    return m ? m[1] : null;
+  };
+
+  let feedEnded = false;
+  let feedEndedPath = null;
 
   function updateFeed() {
     const posts = [...document.querySelectorAll('article')];
     if (!posts.length) return;
+    if (feedEndedPath !== location.pathname) { feedEnded = false; feedEndedPath = location.pathname; }
+
     let trailingHidden = 0;
     for (const post of posts) {
-      const loaded = post.querySelector('img, video');
-      // Ad labels arrive with the post's header; check until it has loaded, then remember.
-      if (post.__unreelAd === undefined || (!post.__unreelAd && !loaded)) {
-        const ad = isAd(post);
-        if (ad || loaded) post.__unreelAd = ad;
+      const key = postKey(post) || post;
+      let hide = post.__unreelHide;
+      if (hide === undefined) {
+        if (typeof key === 'string' && hiddenPosts.has(key)) hide = true;
+        else if (typeof key === 'string' && keptPosts.has(key)) hide = false;
+        else {
+          const loaded = post.querySelector('img, video');
+          if (cfg.blockFeedReels && isReelPost(post)) hide = true;
+          else if (cfg.hideAds && isAd(post)) hide = true;
+          else if (loaded && post.querySelector('header, a[href*="/p/"]')) hide = false;   // fully loaded, nothing to hide
+          // otherwise: not loaded yet, decide on a later pass
+        }
+        if (hide !== undefined) {
+          post.__unreelHide = hide;
+          if (typeof key === 'string') (hide ? hiddenPosts : keptPosts).add(key);
+        }
       }
-      const hide = (cfg.blockFeedReels && isReelPost(post)) || (cfg.hideAds && post.__unreelAd === true);
-      const slot = post.__unreelSlot || (post.__unreelSlot = feedSlot(post));
+      // A kept post can still turn out to be a Reel once its video loads (once only).
+      if (hide === false && cfg.blockFeedReels && post.querySelector('video') && !post.__unreelRechecked) {
+        post.__unreelRechecked = true;
+        hide = post.__unreelHide = true;
+        if (typeof key === 'string') { keptPosts.delete(key); hiddenPosts.add(key); }
+      }
       if (hide) {
+        const slot = feedSlot(post);
         if (slot.style.display !== 'none') slot.style.display = 'none';
         trailingHidden++;
-      } else {
-        if (slot.style.display === 'none' && post.dataset.unreelHidden) slot.style.display = '';
-        if (loaded) trailingHidden = 0;
+      } else if (hide === false) {
+        trailingHidden = 0;
       }
-      post.dataset.unreelHidden = hide ? '1' : '';
     }
 
-    const ended = trailingHidden >= 8;
-    document.documentElement.classList.toggle('unreel-feed-end', ended);
+    // Once the feed is all hidden posts, end it (and keep it ended).
+    if (trailingHidden >= 8) feedEnded = true;
+    document.documentElement.classList.toggle('unreel-feed-end', feedEnded);
     let card = document.getElementById('unreel-caught-up');
-    if (ended && !card) {
+    if (feedEnded && !card) {
       card = document.createElement('div');
       card.id = 'unreel-caught-up';
       card.innerHTML = '<div class="unreel-check">✓</div><div class="unreel-title">You\u2019re all caught up</div><div class="unreel-sub">Everything else here was Reels or ads.</div>';
-      const lastShown = [...posts].reverse().find((p) => !p.dataset.unreelHidden);
-      const anchor = lastShown ? (lastShown.__unreelSlot || lastShown) : posts[0].__unreelSlot;
-      anchor.parentElement.insertBefore(card, anchor.nextSibling);
-    } else if (!ended && card) {
-      card.remove();
+      // Outside Instagram's own list, so it never interferes with how the list updates.
+      const list = feedSlot(posts[posts.length - 1]).parentElement;
+      (list && list.parentElement ? list.parentElement : document.body).appendChild(card);
     }
   }
 
@@ -1069,13 +1259,164 @@
   }
 
   // ---- Sharper previews of shared reels/posts in DMs -----------------------------
-  // The page offers several sizes of each preview but picks a small one. Telling
-  // it the image is large makes it load the biggest size available.
+  // The chat shows a small thumbnail for shared reels. We look up the full-size
+  // cover image for that reel/post (the same request Instagram's own post page
+  // makes) and swap it in. If the reel can't be identified, we try asking the
+  // image server for the full-size version of the same picture.
+  const sharpCache = new Map();   // media id -> best URL (or null if unavailable)
+
+  async function bestImageFor(id) {
+    if (sharpCache.has(id)) return sharpCache.get(id);
+    sharpCache.set(id, null);   // one lookup at a time per id
+    try {
+      const res = await fetch(`/api/v1/media/${id}/info/`, {
+        credentials: 'include',
+        headers: { 'x-ig-app-id': '936619743392459', 'x-requested-with': 'XMLHttpRequest' },
+      });
+      const data = await res.json();
+      const item = data && data.items && data.items[0];
+      const media = item && (item.image_versions2 ? item : item.carousel_media && item.carousel_media[0]);
+      const candidates = (media && media.image_versions2 && media.image_versions2.candidates) || [];
+      const best = candidates.slice().sort((x, y) => (y.width || 0) - (x.width || 0))[0];
+      sharpCache.set(id, best ? best.url : null);
+      return best ? best.url : null;
+    } catch (_) {
+      return null;
+    }
+  }
+
+  // Ask the image server for the full-size file by dropping the "make it small"
+  // part of the address. Only used if the bigger file actually loads.
+  function tryFullSizeUrl(img) {
+    if (img.__unreelTriedUrl) return;
+    img.__unreelTriedUrl = true;
+    let url;
+    try { url = new URL(img.currentSrc || img.src); } catch (_) { return; }
+    if (!url.searchParams.has('stp')) return;
+    url.searchParams.delete('stp');
+    const probe = new Image();
+    probe.onload = () => {
+      if (probe.naturalWidth > (img.naturalWidth || 0) * 1.4) swapImage(img, probe.src);
+    };
+    probe.src = url.toString();
+  }
+
+  function swapImage(img, url) {
+    img.__unreelSharp = url;
+    img.removeAttribute('srcset');
+    if (img.src !== url) img.src = url;
+  }
+
   function sharpenPreviews() {
     if (!location.pathname.startsWith('/direct/')) return;
-    for (const img of document.querySelectorAll('img[srcset]')) {
-      if (img.getAttribute('sizes') !== '1080px') img.setAttribute('sizes', '1080px');
+    for (const img of document.querySelectorAll('img')) {
+      const r = img.getBoundingClientRect();
+      if (r.width < 120 || r.height < 120) continue;   // avatars and icons: leave alone
+      if (img.__unreelSharp) {
+        if (img.src !== img.__unreelSharp) swapImage(img, img.__unreelSharp);   // the page reset it
+        continue;
+      }
+      if (img.hasAttribute('srcset') && img.getAttribute('sizes') !== '1080px') img.setAttribute('sizes', '1080px');
+      if (img.__unreelLooking) continue;
+      img.__unreelLooking = true;
+
+      const link = img.closest('a[href]') || (img.closest('div') && img.closest('div').querySelector('a[href*="/reel/"], a[href*="/p/"]'));
+      const m = link && (link.getAttribute('href') || '').match(SHORTCODE);
+      const id = (m && shortcodeToId(m[1])) || mediaIdFromReact(img, 12);
+      if (!id) { tryFullSizeUrl(img); continue; }
+      bestImageFor(id).then((url) => {
+        if (url) swapImage(img, url); else tryFullSizeUrl(img);
+      });
     }
+  }
+
+  // ---- Peek: long-press in the inbox, banner in the chat ---------------------------
+  let pressTimer = null;
+  let pressStart = null;
+  let swallowClickUntil = 0;
+
+  function inboxRowAt(target) {
+    if (!onInbox() || !target || !target.closest) return null;
+    const row = target.closest('a[href^="/direct/t/"], [role="button"], [role="link"], [role="listitem"]');
+    if (!row || row.closest('#unreel-tabbar')) return null;
+    // A chat row has a profile photo and some text.
+    if (!row.querySelector('img') || !row.textContent.trim()) return null;
+    const r = row.getBoundingClientRect();
+    return r.width > window.innerWidth * 0.6 && r.height < 140 ? row : null;
+  }
+
+  function showToast(text) {
+    let toast = document.getElementById('unreel-toast');
+    if (!toast) {
+      toast = document.createElement('div');
+      toast.id = 'unreel-toast';
+      document.body.appendChild(toast);
+    }
+    toast.textContent = text;
+    toast.classList.add('show');
+    clearTimeout(toast.__timer);
+    toast.__timer = setTimeout(() => toast.classList.remove('show'), 1600);
+  }
+
+  window.addEventListener('touchstart', (e) => {
+    clearTimeout(pressTimer);
+    const row = e.touches.length === 1 && inboxRowAt(e.target.closest ? e.target : e.target.parentElement);
+    if (!row) return;
+    const t = e.touches[0];
+    pressStart = { x: t.clientX, y: t.clientY };
+    pressTimer = setTimeout(() => {
+      pressTimer = null;
+      haptic('medium');
+      setPeekPending(Date.now() + 4000);   // covers the moment the chat opens
+      swallowClickUntil = Date.now() + 800;   // the finger lifting shouldn't tap again
+      showToast('Peeking \u2014 they won\u2019t see that you read it');
+      fire(row);   // open the chat
+    }, 450);
+  }, { capture: true, passive: true });
+
+  window.addEventListener('touchmove', (e) => {
+    if (!pressTimer || !pressStart) return;
+    const t = e.touches[0];
+    if (Math.hypot(t.clientX - pressStart.x, t.clientY - pressStart.y) > 10) { clearTimeout(pressTimer); pressTimer = null; }
+  }, { capture: true, passive: true });
+
+  window.addEventListener('touchend', () => { clearTimeout(pressTimer); pressTimer = null; }, { capture: true, passive: true });
+
+  window.addEventListener('click', (e) => {
+    if (e.isTrusted && Date.now() < swallowClickUntil) {
+      e.preventDefault();
+      e.stopImmediatePropagation();
+    }
+  }, true);
+
+  // When the peeked chat opens, remember it (for this session) and show the banner.
+  function updatePeek() {
+    const id = threadId();
+    if (id && Date.now() < peekPendingUntil && !peekThreads.has(id)) {
+      peekThreads.add(id);
+      savePeeks();
+      setPeekPending(0);
+    }
+    const active = !!(id && peekThreads.has(id));
+    let banner = document.getElementById('unreel-peek');
+    if (!active) { if (banner) banner.remove(); return; }
+    if (!banner) {
+      banner = document.createElement('div');
+      banner.id = 'unreel-peek';
+      banner.innerHTML = '<span>\uD83D\uDC41 Peeking \u00B7 Seen is off</span><button type="button">Mark as read</button>';
+      banner.querySelector('button').addEventListener('click', (e) => {
+        e.preventDefault();
+        e.stopPropagation();
+        peekThreads.delete(id);
+        savePeeks();
+        haptic('light');
+        location.reload();   // reopen normally, so Instagram marks it read
+      });
+      document.body.appendChild(banner);
+    }
+    const header = [...document.querySelectorAll('header, [role="banner"]')].find((h) => h.getBoundingClientRect().top < 20);
+    const top = header ? header.getBoundingClientRect().bottom : 70;
+    banner.style.top = `${Math.max(56, top) + 8}px`;
   }
 
   // ---- Actions the app can trigger (Home Screen quick actions) ----------------
@@ -1109,6 +1450,11 @@
     // Instagram's own bar stays laid out (so it keeps updating) but invisible.
     '.unreel-tabbar-on [data-unreel-sitenav] { opacity: 0 !important; pointer-events: none !important; }',
     '.unreel-has-tabbar body { padding-bottom: var(--unreel-tabbar-h, 50px) !important; }',
+    // Peek banner and toast.
+    '#unreel-peek { position: fixed; left: 50%; transform: translateX(-50%); z-index: 2147483001; display: flex; align-items: center; gap: 10px; padding: 7px 8px 7px 14px; border-radius: 999px; font-size: 13px; font-weight: 600; color: #fff; background: rgba(40,40,46,0.92); box-shadow: 0 4px 16px rgba(0,0,0,0.25); white-space: nowrap; }',
+    '#unreel-peek button { border: 0; border-radius: 999px; padding: 5px 10px; font: inherit; font-size: 12px; color: #000; background: #fff; }',
+    '#unreel-toast { position: fixed; left: 50%; bottom: 90px; transform: translate(-50%, 20px); opacity: 0; transition: opacity .2s, transform .2s; z-index: 2147483002; padding: 9px 14px; border-radius: 999px; font-size: 13px; font-weight: 600; color: #fff; background: rgba(40,40,46,0.92); pointer-events: none; white-space: nowrap; }',
+    '#unreel-toast.show { opacity: 1; transform: translate(-50%, 0); }',
     // DM inbox "Sent 21m ago" line drawn over the page's own text.
     '[data-unreel-status] { font-size: 0 !important; }',
     '[data-unreel-status] * { display: none !important; }',
@@ -1121,7 +1467,8 @@
     '#unreel-caught-up .unreel-title { font-size: 20px; font-weight: 600; }',
     '#unreel-caught-up .unreel-sub { font-size: 14px; opacity: 0.6; margin-top: 6px; }',
     // Feed header: + left, logo centered, heart stays right.
-    '.unreel-feed-header [data-unreel-header] { position: relative !important; }',
+    '.unreel-feed-header [data-unreel-header] { position: relative !important; justify-content: flex-end !important; }',
+    '.unreel-feed-header [data-unreel-actions] { margin-left: auto !important; }',
     '.unreel-feed-header [data-unreel-brand] { position: absolute !important; left: 50% !important; top: 50% !important; transform: translate(-50%, -50%) scale(1.1) !important; margin: 0 !important; }',
     '.unreel-feed-header [data-unreel-newpost] { position: absolute !important; left: 16px !important; top: 50% !important; transform: translateY(-50%) !important; margin: 0 !important; }',
     // Story viewer search box.
@@ -1185,6 +1532,7 @@
     updateTabBar();
     updateHeader();
     updateInboxStatus();
+    updatePeek();
 
 
     // Fallback in case a navigation slipped past the history hooks.

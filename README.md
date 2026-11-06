@@ -11,6 +11,7 @@ Instagram without the Reels feed. Unreel shows instagram.com in a native iOS app
 - Reopens where you left off (except reels and login screens).
 - Long-press the app icon for Messages, New Post, and Filters.
 - Search box on your Story's viewer list.
+- Peek: long-press a chat in the inbox to read it without sending "Seen" (banner in the chat has "Mark as read").
 - Filters → Extras: switch the app icon, and a Bio Fonts generator (look-alike Unicode text for your bio).
 
 A Shortcuts automation sends taps on the real Instagram icon to Unreel.
