@@ -3,7 +3,7 @@ import WebKit
 
 /// Owns the single WKWebView that shows instagram.com with filter.js injected.
 @MainActor
-final class WebViewStore: NSObject, ObservableObject, WKNavigationDelegate, WKUIDelegate {
+final class WebViewStore: NSObject, ObservableObject, WKNavigationDelegate, WKUIDelegate, WKScriptMessageHandler {
     static let home = URL(string: "https://www.instagram.com/")!
 
     // Present as mobile Safari so Instagram serves its normal mobile site.
@@ -14,6 +14,8 @@ final class WebViewStore: NSObject, ObservableObject, WKNavigationDelegate, WKUI
 
     let webView: WKWebView
     @Published var hasLoaded = false
+    /// Instagram's actual page background, used to color the status bar and home-indicator areas.
+    @Published var pageColor: UIColor
 
     private let filterSource: String
     private var appliedConfig: String?
@@ -30,8 +32,11 @@ final class WebViewStore: NSObject, ObservableObject, WKNavigationDelegate, WKUI
         filterSource = Bundle.main.url(forResource: "filter", withExtension: "js")
             .flatMap { try? String(contentsOf: $0, encoding: .utf8) } ?? ""
 
+        pageColor = Self.savedPageColor() ?? .systemBackground
+
         super.init()
 
+        webView.configuration.userContentController.add(self, name: "theme")
         webView.customUserAgent = Self.safariUA
         webView.allowsBackForwardNavigationGestures = true   // edge swipe = back
         webView.allowsLinkPreview = false                    // no Safari-style peek on long-press
@@ -43,9 +48,7 @@ final class WebViewStore: NSObject, ObservableObject, WKNavigationDelegate, WKUI
 
         // Blend with the page instead of flashing white.
         webView.isOpaque = false
-        webView.backgroundColor = .systemBackground
-        webView.scrollView.backgroundColor = .systemBackground
-        webView.underPageBackgroundColor = .systemBackground
+        applyPageColor(pageColor)
 
         // Native pull-to-refresh.
         refreshControl.addTarget(self, action: #selector(pullToRefresh), for: .valueChanged)
@@ -91,6 +94,35 @@ final class WebViewStore: NSObject, ObservableObject, WKNavigationDelegate, WKUI
 
     private static func isAllowed(_ host: String) -> Bool {
         allowedHosts.contains { host == $0 || host.hasSuffix("." + $0) }
+    }
+
+    // MARK: Page color
+
+    func userContentController(_ controller: WKUserContentController, didReceive message: WKScriptMessage) {
+        guard message.name == "theme", let css = message.body as? String,
+              let color = Self.parseCSSColor(css) else { return }
+        applyPageColor(color)
+        UserDefaults.standard.set(css, forKey: "pageColorCSS")
+    }
+
+    private func applyPageColor(_ color: UIColor) {
+        pageColor = color
+        webView.backgroundColor = color
+        webView.scrollView.backgroundColor = color
+        webView.underPageBackgroundColor = color
+    }
+
+    private static func savedPageColor() -> UIColor? {
+        UserDefaults.standard.string(forKey: "pageColorCSS").flatMap(parseCSSColor)
+    }
+
+    /// Parses "rgb(12, 16, 20)" / "rgba(12, 16, 20, 1)".
+    private static func parseCSSColor(_ css: String) -> UIColor? {
+        let nums = css.split(whereSeparator: { !"0123456789.".contains($0) }).compactMap { Double($0) }
+        guard nums.count >= 3 else { return nil }
+        let alpha = nums.count >= 4 ? nums[3] : 1
+        guard alpha > 0.5 else { return nil }
+        return UIColor(red: nums[0] / 255, green: nums[1] / 255, blue: nums[2] / 255, alpha: 1)
     }
 
     // MARK: WKNavigationDelegate

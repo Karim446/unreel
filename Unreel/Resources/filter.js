@@ -110,6 +110,8 @@
       });
     }
 
+    reportTheme();
+
     // Instagram can rewrite <head>; keep zoom locked.
     lockViewport();
 
@@ -125,6 +127,21 @@
       scheduled = false;
       sweep();
     });
+  }
+
+  // Tell the app Instagram's background color so the safe areas match it.
+  let lastTheme = null;
+  function reportTheme() {
+    const bg = (el) => {
+      if (!el) return null;
+      const c = getComputedStyle(el).backgroundColor;
+      return c && c !== 'transparent' && !/rgba\(.*,\s*0\)$/.test(c) ? c : null;
+    };
+    const color = bg(document.body) || bg(document.documentElement);
+    if (color && color !== lastTheme) {
+      lastTheme = color;
+      window.webkit?.messageHandlers?.theme?.postMessage(color);
+    }
   }
 
   // Disable pinch/double-tap zoom.

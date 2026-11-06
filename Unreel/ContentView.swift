@@ -10,8 +10,8 @@ struct ContentView: View {
 
     var body: some View {
         ZStack {
-            // Matches Instagram's white/black background so there's no flash or seam.
-            Color(.systemBackground).ignoresSafeArea()
+            // Fills the status-bar and home-indicator areas with Instagram's own background color.
+            Color(uiColor: store.pageColor).ignoresSafeArea()
 
             InstagramWebView(webView: store.webView)
                 .opacity(store.hasLoaded ? 1 : 0)
