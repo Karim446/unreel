@@ -8,6 +8,7 @@
     { blockReelsTab: true, blockFeedReels: true, allowDMReels: true, hideExploreGrid: true },
     window.__UNREEL__ || {}
   );
+  paintBackground(window.__UNREEL_BG__);   // dark from the very first frame
   const INBOX = '/direct/inbox/';
   const haptic = (style) => window.webkit?.messageHandlers?.haptic?.postMessage(style);
   const reelsRestricted = cfg.blockReelsTab || cfg.blockFeedReels;
@@ -259,15 +260,30 @@
     return null;
   }
 
-  function postLikeIcon(media) {
-    const scope = media.closest('article') || document;
-    const mediaBottom = media.getBoundingClientRect().bottom;
-    for (const icon of scope.querySelectorAll('svg[aria-label="Like"], svg[aria-label="Unlike"]')) {
+  // The like button for this photo/video: the big heart under a feed post, or
+  // the big heart overlaid on the right edge of a full-screen reel.
+  function likeIconFor(media) {
+    const mr = media.getBoundingClientRect();
+    const scope = media.closest('article') || media.closest('[role="dialog"]') || document;
+    const icons = [...scope.querySelectorAll('svg[aria-label="Like"], svg[aria-label="Unlike"]')]
+      .filter((icon) => icon.getBoundingClientRect().width >= 20);   // comment hearts are tiny
+    const below = icons.find((icon) => icon.getBoundingClientRect().top >= mr.bottom - 10);
+    if (below) return below;
+    return icons.find((icon) => {
       const r = icon.getBoundingClientRect();
-      // The post's like button is the big heart just under the photo (comment hearts are tiny).
-      if (r.width >= 20 && r.top >= mediaBottom - 10) return icon;
+      return r.left > mr.left + mr.width * 0.6 && r.top >= mr.top && r.bottom <= mr.bottom + 10;
+    }) || null;
+  }
+
+  function likeMedia(media) {
+    const icon = likeIconFor(media);
+    if (!icon) return;
+    showHeart(media);
+    if (icon.getAttribute('aria-label') === 'Like') {
+      fire(pressable(icon));        // the haptics click handler plays the tap
+    } else {
+      haptic('medium');             // already liked: just the pop, like the app
     }
-    return null;
   }
 
   function showHeart(media) {
@@ -298,30 +314,60 @@
     ).onfinish = () => heart.remove();
   }
 
-  let lastTap = null;
-  window.addEventListener('touchend', (e) => {
-    if (e.touches.length || e.changedTouches.length !== 1) return;
-    const t = e.changedTouches[0];
+  // Taps on videos are held for a moment: if a second tap follows it's a like;
+  // if not, the original tap is passed on (so pause/play still works, it just
+  // doesn't fire on the first half of a double-tap).
+  const DOUBLE_TAP_MS = 280;
+  let pendingTap = null;
+  let replaying = false;
+
+  window.addEventListener('click', (e) => {
+    if (replaying || !e.isTrusted) return;
+    const media = mediaAt(e.clientX, e.clientY);
+    if (!media) { pendingTap = null; return; }
+
+    // Leave real controls alone (like/comment/share buttons, links, the reply box).
     const target = e.target.closest ? e.target : e.target.parentElement;
-    if (!target || target.closest('input, textarea, [contenteditable="true"]')) { lastTap = null; return; }
+    if (target.closest('input, textarea, [contenteditable="true"]')) return;
+    const control = target.closest('button, [role="button"], a');
+    if (control) {
+      const c = control.getBoundingClientRect();
+      const m = media.getBoundingClientRect();
+      if (c.width * c.height < m.width * m.height * 0.5) return;   // a small control, not the video surface
+    }
 
     const now = Date.now();
-    const isDouble = lastTap && now - lastTap.time < 320 && Math.hypot(t.clientX - lastTap.x, t.clientY - lastTap.y) < 40;
-    if (!isDouble) { lastTap = { time: now, x: t.clientX, y: t.clientY }; return; }
-    lastTap = null;
+    const isDouble = pendingTap && now - pendingTap.time < DOUBLE_TAP_MS + 60 &&
+      Math.hypot(e.clientX - pendingTap.x, e.clientY - pendingTap.y) < 40;
 
-    const media = mediaAt(t.clientX, t.clientY);
-    if (!media || viewerVideo() === media) return;   // not a post, or a full-screen reel
-    const icon = postLikeIcon(media);
-    if (!icon) return;
-
-    showHeart(media);
-    if (icon.getAttribute('aria-label') === 'Like') {
-      fire(pressable(icon));        // the click handler above plays the haptic
-    } else {
-      haptic('medium');             // already liked: just the pop, like the app
+    if (isDouble) {
+      clearTimeout(pendingTap.timer);
+      pendingTap = null;
+      e.preventDefault();
+      e.stopImmediatePropagation();
+      likeMedia(media);
+      return;
     }
-  }, { capture: true, passive: true });
+
+    if (media.tagName === 'VIDEO') {
+      e.preventDefault();
+      e.stopImmediatePropagation();
+      const original = e.target;
+      const x = e.clientX;
+      const y = e.clientY;
+      pendingTap = {
+        time: now, x, y,
+        timer: setTimeout(() => {
+          pendingTap = null;
+          replaying = true;
+          original.dispatchEvent(new MouseEvent('click', { bubbles: true, cancelable: true, clientX: x, clientY: y, view: window }));
+          replaying = false;
+        }, DOUBLE_TAP_MS),
+      };
+    } else {
+      pendingTap = { time: now, x: e.clientX, y: e.clientY, timer: null };   // photos: let the tap through
+    }
+  }, true);
 
   // ---- Keyboard: predictive text and emoji suggestions -----------------------
   // Instagram's site turns autocorrect off on its text boxes, which also hides
@@ -366,6 +412,12 @@
     'input, textarea, [contenteditable="true"], [contenteditable="true"] * { -webkit-user-select: text; user-select: text; -webkit-touch-callout: default; }',
   ];
   if (cfg.blockReelsTab) css.push('a[href="/reels/"], a[href^="/reels/?"] { display: none !important; }');
+
+  // Paint <html> with Instagram's background so any area that isn't drawn yet
+  // (page changes, keyboard closing) shows that color instead of a white flash.
+  function paintBackground(color) {
+    if (color) document.documentElement.style.backgroundColor = color;
+  }
 
   function addStyle() {
     const style = document.createElement('style');
@@ -461,6 +513,7 @@
     const color = bg(document.body) || bg(document.documentElement);
     if (color && color !== lastTheme) {
       lastTheme = color;
+      paintBackground(color);
       window.webkit?.messageHandlers?.theme?.postMessage(color);
     }
   }
@@ -478,6 +531,7 @@
   }
 
   function start() {
+    paintBackground(window.__UNREEL_BG__);
     addStyle();
     lockViewport();
     sweep();

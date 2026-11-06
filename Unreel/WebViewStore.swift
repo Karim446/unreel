@@ -77,9 +77,13 @@ final class WebViewStore: NSObject, ObservableObject, WKNavigationDelegate, WKUI
         guard config != appliedConfig else { return }
         appliedConfig = config
 
+        // Last known Instagram background, so the page never starts out white.
+        let bg = UserDefaults.standard.string(forKey: "pageColorCSS")
+            .map { "window.__UNREEL_BG__ = \"\($0)\";" } ?? ""
+
         let ucc = webView.configuration.userContentController
         ucc.removeAllUserScripts()
-        ucc.addUserScript(WKUserScript(source: config + "\n" + filterSource,
+        ucc.addUserScript(WKUserScript(source: config + "\n" + bg + "\n" + filterSource,
                                        injectionTime: .atDocumentStart,
                                        forMainFrameOnly: true))
         if reloadIfChanged { webView.reload() }
