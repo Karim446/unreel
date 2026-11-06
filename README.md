@@ -3,7 +3,7 @@
 Instagram without the Reels feed. Unreel shows instagram.com in a native iOS app and filters it as it loads:
 
 - The Reels tab is hidden, and visiting /reels/ redirects to your DMs.
-- Reels are removed from the home feed.
+- Reels (any video post) and ads are removed from the home feed; the feed ends with an "all caught up" card instead of scrolling through blank space.
 - Reels your friends send in DMs still play, one at a time. Swiping to another Reel sends you back to the chat.
 - The Explore grid is hidden while search keeps working (toggle in Filters).
 - Haptic taps when you like a post, double-tap a photo, switch tabs, or swipe a reel closed.

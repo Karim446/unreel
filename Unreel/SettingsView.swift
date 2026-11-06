@@ -21,8 +21,9 @@ struct SettingsView: View {
                 }
                 Section {
                     Toggle("Hide the Explore grid", isOn: $settings.hideExploreGrid)
+                    Toggle("Hide ads", isOn: $settings.hideAds)
                 } footer: {
-                    Text("Search still works, so you can find people and accounts.")
+                    Text("Search still works with the Explore grid hidden. Hiding ads removes sponsored posts from the feed and skips sponsored Stories.")
                 }
                 Section("Extras") {
                     NavigationLink("App Icon") { AppIconPicker() }

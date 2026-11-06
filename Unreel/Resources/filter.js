@@ -5,12 +5,26 @@
   window.__unreelLoaded = true;
 
   const cfg = Object.assign(
-    { blockReelsTab: true, blockFeedReels: true, allowDMReels: true, hideExploreGrid: true },
+    { blockReelsTab: true, blockFeedReels: true, allowDMReels: true, hideExploreGrid: true, hideAds: true },
     window.__UNREEL__ || {}
   );
-  paintBackground(window.__UNREEL_BG__);   // dark from the very first frame
   const INBOX = '/direct/inbox/';
   const haptic = (style) => window.webkit?.messageHandlers?.haptic?.postMessage(style);
+
+  // ---- Light / dark mode helpers ----
+  const prefersDark = () => !window.matchMedia || window.matchMedia('(prefers-color-scheme: dark)').matches;
+  const isTransparent = (c) => !c || c === 'transparent' || /rgba\(.*,\s*0\)$/.test(c);
+  function luminance(css) {
+    const [r, g, b] = (String(css).match(/[\d.]+/g) || [0, 0, 0]).map(Number);
+    return 0.299 * r + 0.587 * g + 0.114 * b;
+  }
+  // The page's background right now (falls back to the mode's default).
+  const pageBg = () => lastTheme || (prefersDark() ? 'rgb(12,16,20)' : 'rgb(255,255,255)');
+  const isDarkColor = (css) => luminance(css) < 128;
+
+  // Paint the page with Instagram's last known background (for this mode) from
+  // the very first frame, so it never flashes the wrong color.
+  paintBackground(window.__UNREEL_BG__);
   const reelsRestricted = cfg.blockReelsTab || cfg.blockFeedReels;
 
   let lastPath = location.pathname;
@@ -197,6 +211,16 @@
     if (target.closest('input, textarea, [contenteditable="true"]')) return;
     const dialog = target.closest('[role="dialog"]');
     if (dialog && !dialog.contains(video)) return;   // e.g. the comments sheet keeps scrolling
+    if (dialog && video.closest('[role="dialog"]') !== dialog) return;
+    // Anything that scrolls on its own (the comments list) keeps its normal scrolling.
+    for (let el = target; el && el !== document.body; el = el.parentElement) {
+      if (el.contains(video)) break;
+      const oy = getComputedStyle(el).overflowY;
+      if ((oy === 'auto' || oy === 'scroll') && el.scrollHeight > el.clientHeight + 2) return;
+    }
+    // Only start a swipe on the video itself, not on a sheet drawn over it.
+    const box = (video.parentElement && video.parentElement.parentElement) || video.parentElement || video;
+    if (!document.elementsFromPoint(t.clientX, t.clientY).slice(0, 6).some((el) => el === video || el.contains(video) || box.contains(el))) return;
     const r = video.getBoundingClientRect();
     if (t.clientX < r.left || t.clientX > r.right || t.clientY < r.top || t.clientY > r.bottom) return;
     drag = { x: t.clientX, y: t.clientY, time: Date.now(), axis: null, video };
@@ -298,30 +322,88 @@
     }) || null;
   }
 
+  // ---- Liking through Instagram's own like request ---------------------------
+  // Tapping the heart for you didn't always register, so a double-tap now sends
+  // the same request Instagram's like button sends (as you, from this page, with
+  // your login). The heart button is also tapped so the icon turns red.
+
+  const SHORTCODE = /\/(?:p|reel|reels)\/([A-Za-z0-9_-]{5,})/;
+  const B64 = 'ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-_';
+
+  function shortcodeToId(code) {
+    let id = 0n;
+    for (const ch of code.slice(0, 11)) {
+      const v = B64.indexOf(ch);
+      if (v < 0) return null;
+      id = id * 64n + BigInt(v);
+    }
+    return id.toString();
+  }
+
+  // The post or reel this media belongs to.
+  function shortcodeFor(media) {
+    const scope = media.closest('article') || media.closest('[role="dialog"]') || null;
+    const links = scope ? [...scope.querySelectorAll('a[href]')] : [];
+    for (const a of links) {
+      if (a.offsetParent === null) continue;   // skip hidden links (other reels)
+      const m = (a.getAttribute('href') || '').match(SHORTCODE);
+      if (m) return m[1];
+    }
+    const here = location.pathname.match(SHORTCODE);
+    return here ? here[1] : null;
+  }
+
+  async function likeRequest(shortcode) {
+    const id = shortcodeToId(shortcode);
+    const csrf = (document.cookie.match(/(?:^|;\s*)csrftoken=([^;]+)/) || [])[1];
+    if (!id || !csrf) return false;
+    try {
+      const res = await fetch(`/api/v1/web/likes/${id}/like/`, {
+        method: 'POST',
+        credentials: 'include',
+        headers: {
+          'x-csrftoken': csrf,
+          'x-ig-app-id': '936619743392459',
+          'x-requested-with': 'XMLHttpRequest',
+          'x-instagram-ajax': '1',
+          'content-type': 'application/x-www-form-urlencoded',
+        },
+      });
+      if (!res.ok) return false;
+      const body = await res.json().catch(() => ({}));
+      return body.status === 'ok';
+    } catch (_) {
+      return false;
+    }
+  }
+
   const isLiked = (icon) => icon && icon.getAttribute('aria-label') === 'Unlike';
 
   async function likeMedia(media) {
     const icon = likeIconFor(media);
-    if (!icon) return;
-    showHeart(media);
+    const code = shortcodeFor(media);
+    if (!icon && !code) return;   // not a post or reel (e.g. a video in a chat)
+    try { showHeart(media); } catch (_) {}   // the visual must never block the like
     haptic('medium');
-    if (isLiked(icon)) return;   // already liked: just the pop, like the app
+    if (icon && isLiked(icon)) return;   // already liked: just the pop, like the app
 
-    // Tap the heart, then confirm Instagram actually registered the like. If not,
-    // try the heart's small wrapper elements (never anything as big as the video).
-    const targets = [icon];
-    for (let el = icon.parentElement, i = 0; el && i < 5; el = el.parentElement, i++) {
-      const r = el.getBoundingClientRect();
-      if (r.width > 120 || r.height > 120) break;
-      targets.push(el);
-    }
-    for (const target of targets) {
-      fire(target);
-      for (let waited = 0; waited < 600; waited += 100) {
-        await sleep(100);
-        if (!icon.isConnected || icon.getAttribute('aria-label') !== 'Like') return;   // liked
-        const current = likeIconFor(media);
-        if (isLiked(current)) return;
+    // 1. Send the like itself, so the creator gets it no matter what the page does.
+    const sent = code ? await likeRequest(code) : false;
+
+    // 2. Turn the heart red. Tapping Instagram's button sends the same like again,
+    //    which is harmless: a like can't be counted twice.
+    if (icon && icon.isConnected && !isLiked(icon)) {
+      fire(icon);
+      if (!sent) {
+        // Couldn't send it directly: make sure the button tap registered.
+        for (let el = icon.parentElement, i = 0; el && i < 4; el = el.parentElement, i++) {
+          await sleep(350);
+          const now = likeIconFor(media);
+          if (!icon.isConnected || isLiked(now)) return;
+          const r = el.getBoundingClientRect();
+          if (r.width > 120 || r.height > 120) return;
+          fire(el);
+        }
       }
     }
   }
@@ -342,6 +424,7 @@
       opacity: '0',
     });
     document.body.appendChild(heart);
+    if (!heart.animate) { setTimeout(() => heart.remove(), 800); return; }
     heart.animate(
       [
         { transform: 'scale(0.2)', opacity: 0 },
@@ -466,8 +549,9 @@
   }
 
   // The tabs we show: the site's links, minus Reels and anything hidden.
+  // (Reels is included only when the Reels tab isn't blocked in Filters.)
   const siteNavLinks = (nav) => [...nav.querySelectorAll('a[href]')].filter((a) =>
-    a.getAttribute('href') !== '/reels/' && getComputedStyle(a).display !== 'none');
+    !(cfg.blockReelsTab && a.getAttribute('href').startsWith('/reels')) && getComputedStyle(a).display !== 'none');
 
   // Remember each tab's icon in its selected and unselected state.
   function captureSiteNav(nav) {
@@ -485,6 +569,7 @@
     if (!items.length) return;
     const cs = getComputedStyle(nav);
     const next = {
+      scheme: prefersDark() ? 'dark' : 'light',
       height: nav.getBoundingClientRect().height,
       background: cs.backgroundColor,
       borderTop: cs.borderTopWidth !== '0px' ? cs.borderTop : '',
@@ -497,6 +582,16 @@
     try { localStorage.setItem(NAV_KEY, json); } catch (_) {}
   }
 
+  const sameMode = () => savedNav && savedNav.scheme === (prefersDark() ? 'dark' : 'light');
+  // The bar's color: the site's own bar color if it was saved in this mode,
+  // otherwise the page's background.
+  function currentBarBg() {
+    if (sameMode() && !isTransparent(savedNav.background) && isDarkColor(savedNav.background) === prefersDark()) {
+      return savedNav.background;
+    }
+    return pageBg();
+  }
+
   // Instagram's site never shows a selected Messages icon, so make one the way
   // the app draws it: the paper plane filled in, with its fold line cut out.
   function selectedMessagesIcon(html) {
@@ -505,7 +600,7 @@
     const svg = holder.querySelector('svg');
     if (!svg) return html;
     svg.querySelectorAll('polygon, path').forEach((shape) => shape.setAttribute('fill', 'currentColor'));
-    svg.querySelectorAll('line').forEach((line) => line.setAttribute('stroke', lastTheme || 'rgb(12,16,20)'));
+    svg.querySelectorAll('line').forEach((line) => line.setAttribute('stroke', currentBarBg()));
     return holder.innerHTML;
   }
 
@@ -576,6 +671,22 @@
     let want = !!(savedNav && savedNav.items && savedNav.items.length && (nav || onInbox()));
     let bar = document.getElementById('unreel-tabbar');
 
+    // Like the app: no tab bar over a sheet (a note, comments, share menu) or
+    // while the keyboard is up.
+    const active = document.activeElement;
+    const typing = active && active.matches && active.matches('input, textarea, [contenteditable="true"]');
+    const sheetOpen = [...document.querySelectorAll('[role="dialog"]')].some((d) => {
+      const h = d.getBoundingClientRect().height;
+      return h > 0 && h < window.innerHeight - 10;   // a sheet, not a full page
+    });
+    if (typing || sheetOpen) {
+      document.documentElement.classList.remove('unreel-tabbar-on', 'unreel-has-tabbar');
+      if (bar) bar.remove();
+      lastSig = '';
+      lastWanted = 0;
+      return;
+    }
+
     // Going from one tab to another (e.g. inbox → profile), there are a few frames
     // where the old page is gone and the new page hasn't drawn its bar yet. Keep
     // ours up through that gap instead of blinking. Opening a chat still hides it
@@ -604,17 +715,18 @@
     }
 
     const icons = iconsToShow(nav);
-    const sig = savedNav.height + '|' + icons.map((i) => i.href + i.html).join('|');
+    const sig = currentBarBg() + '|' + icons.map((i) => i.href + i.html).join('|');
     if (sig === lastSig) return;
     lastSig = sig;
 
-    const bg = savedNav.background && !/rgba\(.*,\s*0\)$/.test(savedNav.background) && savedNav.background !== 'transparent'
-      ? savedNav.background : (lastTheme || 'rgb(12,16,20)');
-    const [r, g, b] = (bg.match(/[\d.]+/g) || [12, 16, 20]).map(Number);
+    const bg = currentBarBg();
+    const dark = isDarkColor(bg);
     bar.style.height = `${TAB_BAR_HEIGHT}px`;
     bar.style.background = bg;
-    bar.style.borderTop = savedNav.borderTop || '';
-    bar.style.color = (0.299 * r + 0.587 * g + 0.114 * b) < 128 ? '#f5f5f5' : '#000';
+    bar.style.borderTop = sameMode() && savedNav.borderTop ? savedNav.borderTop
+      : `0.5px solid ${dark ? 'rgba(255,255,255,0.12)' : 'rgba(0,0,0,0.12)'}`;
+    bar.style.color = dark ? '#f5f5f5' : '#000';
+    bar.dataset.scheme = dark ? 'dark' : 'light';
     document.documentElement.style.setProperty('--unreel-tabbar-h', `${TAB_BAR_HEIGHT}px`);
     bar.innerHTML = icons.map((i) => `<a class="unreel-tab" href="${i.href}">${i.html}</a>`).join('');
   }
@@ -727,6 +839,26 @@
     }
   }
 
+  // Switching between light and dark mode while the app is open.
+  if (window.matchMedia) {
+    const mq = window.matchMedia('(prefers-color-scheme: dark)');
+    const onModeChange = () => {
+      lastTheme = null;
+      document.documentElement.style.backgroundColor = '';
+      setTimeout(() => {
+        reportTheme();
+        lastSig = '';
+        updateTabBar(true);
+      }, 50);
+    };
+    if (mq.addEventListener) mq.addEventListener('change', onModeChange);
+    else if (mq.addListener) mq.addListener(onModeChange);
+  }
+
+  // Keyboard up/down doesn't change the page, so re-check the tab bar on focus changes.
+  document.addEventListener('focusin', () => setTimeout(() => updateTabBar(), 0), true);
+  document.addEventListener('focusout', () => setTimeout(() => updateTabBar(), 0), true);
+
   // ---- Feed header layout like the app ----------------------------------------
   // The app puts + on the left, the Instagram logo in the middle and the heart on
   // the right. The mobile site has the logo on the left and + next to the heart.
@@ -740,11 +872,27 @@
     const existing = document.querySelector('[data-unreel-header]');
     if (existing && existing.isConnected && existing.querySelector('[data-unreel-newpost]')) return;
 
-    const logo = [...document.querySelectorAll('svg[aria-label="Instagram"]')]
-      .find((svg) => svg.getBoundingClientRect().top < 140);
-    const plus = [...document.querySelectorAll('svg[aria-label="New post"]')]
-      .find((svg) => svg.getBoundingClientRect().top < 140);
-    if (!logo || !plus) return;
+    // Find the pieces by position rather than by label (labels vary): the wide
+    // logo, the heart at the far right, and the + just left of the heart.
+    const inHeader = (el) => {
+      if (el.closest('#unreel-tabbar')) return false;
+      const r = el.getBoundingClientRect();
+      return r.height > 0 && r.top >= -5 && r.bottom < 130;
+    };
+    const top = [...document.querySelectorAll('svg')].filter(inHeader);
+    // The logo may be an SVG, an image, or a CSS sprite.
+    const logos = [...document.querySelectorAll('svg, img, i[data-visualcompletion="css-img"], [aria-label="Instagram"]')].filter(inHeader);
+    if (!top.length || !logos.length) return;
+    const width = (el) => el.getBoundingClientRect().width;
+    const logo = logos.reduce((a, b) => (width(b) > width(a) ? b : a));
+    if (width(logo) < 70) return;
+    const logoRight = logo.getBoundingClientRect().right;
+    const icons = top
+      .filter((svg) => svg !== logo && width(svg) <= 40 && svg.getBoundingClientRect().left > logoRight + 30)
+      .sort((a, b) => a.getBoundingClientRect().left - b.getBoundingClientRect().left);
+    if (icons.length < 2) return;
+    const plus = icons[icons.length - 2];   // the heart is last; + sits just before it
+    if (plus.getBoundingClientRect().left < window.innerWidth / 2) return;
 
     // The header row: the closest element that holds both the logo and the +.
     let row = logo.parentElement;
@@ -812,6 +960,124 @@
     }, 60);
   }, { capture: true, passive: true });
 
+  // ---- Home feed: hide Reels and ads, and stop the endless blank feed ---------
+  // Every video in the feed is a Reel now (many link to /p/, not /reel/), so a
+  // post counts as a Reel if it has a video or a Reel link. Ads are posts marked
+  // "Sponsored"/"Ad". We hide each post's whole slot in the feed list (not just
+  // the post), so no empty gap is left behind.
+  //
+  // When almost everything Instagram loads is hidden, the site keeps fetching
+  // forever and you scroll through nothing. After a long run of hidden posts we
+  // end the feed with an "all caught up" card and stop the loading.
+
+  const AD_LABEL = /^(sponsored|ad|paid partnership with meta)$/i;
+
+  function isAd(post) {
+    for (const el of post.querySelectorAll('span, a, div')) {
+      if (el.childElementCount === 0 && AD_LABEL.test(el.textContent.trim())) return true;
+    }
+    return false;
+  }
+  const isReelPost = (post) => !!(post.querySelector('video') || post.querySelector(REEL_LINK) ||
+    post.querySelector('svg[aria-label="Audio is muted"], svg[aria-label="Audio is playing"], [aria-label="Toggle audio"], svg[aria-label="Clip"], svg[aria-label="Reel"]'));
+
+  // The post's slot in the feed list: the ancestor whose parent holds other posts too.
+  function feedSlot(post) {
+    let slot = post;
+    while (slot.parentElement && slot.parentElement !== document.body) {
+      const parent = slot.parentElement;
+      if ([...parent.children].filter((c) => c !== slot && c.querySelector && c.querySelector('article')).length) return slot;
+      slot = parent;
+    }
+    return post;
+  }
+
+  function updateFeed() {
+    const posts = [...document.querySelectorAll('article')];
+    if (!posts.length) return;
+    let trailingHidden = 0;
+    for (const post of posts) {
+      const loaded = post.querySelector('img, video');
+      // Ad labels arrive with the post's header; check until it has loaded, then remember.
+      if (post.__unreelAd === undefined || (!post.__unreelAd && !loaded)) {
+        const ad = isAd(post);
+        if (ad || loaded) post.__unreelAd = ad;
+      }
+      const hide = (cfg.blockFeedReels && isReelPost(post)) || (cfg.hideAds && post.__unreelAd === true);
+      const slot = post.__unreelSlot || (post.__unreelSlot = feedSlot(post));
+      if (hide) {
+        if (slot.style.display !== 'none') slot.style.display = 'none';
+        trailingHidden++;
+      } else {
+        if (slot.style.display === 'none' && post.dataset.unreelHidden) slot.style.display = '';
+        if (loaded) trailingHidden = 0;
+      }
+      post.dataset.unreelHidden = hide ? '1' : '';
+    }
+
+    const ended = trailingHidden >= 8;
+    document.documentElement.classList.toggle('unreel-feed-end', ended);
+    let card = document.getElementById('unreel-caught-up');
+    if (ended && !card) {
+      card = document.createElement('div');
+      card.id = 'unreel-caught-up';
+      card.innerHTML = '<div class="unreel-check">✓</div><div class="unreel-title">You\u2019re all caught up</div><div class="unreel-sub">Everything else here was Reels or ads.</div>';
+      const lastShown = [...posts].reverse().find((p) => !p.dataset.unreelHidden);
+      const anchor = lastShown ? (lastShown.__unreelSlot || lastShown) : posts[0].__unreelSlot;
+      anchor.parentElement.insertBefore(card, anchor.nextSibling);
+    } else if (!ended && card) {
+      card.remove();
+    }
+  }
+
+  // ---- Stories: start with sound, skip ads -------------------------------------
+  let lastAdSkip = 0;
+  function updateStories() {
+    if (!location.pathname.startsWith('/stories/')) return;
+    for (const v of document.querySelectorAll('video')) {
+      if (v.getBoundingClientRect().height > window.innerHeight * 0.4) startUnmuted(v);
+    }
+    if (cfg.hideAds && Date.now() - lastAdSkip > 900) {
+      const sponsored = [...document.querySelectorAll('span, div')]
+        .find((el) => el.childElementCount === 0 && /^sponsored$/i.test(el.textContent.trim()) && el.getBoundingClientRect().height > 0);
+      const next = sponsored && document.querySelector('[aria-label="Next"], svg[aria-label="Next"]');
+      if (next) { lastAdSkip = Date.now(); fire(next); }
+    }
+  }
+
+  // ---- DM inbox: "Sent 21m ago" like the app ------------------------------------
+  // For chats where your message is the latest, the app shows "Sent 21m ago"
+  // instead of "You: … · 21m". The page's text stays in place (Instagram keeps
+  // updating it); we only draw the app-style line over it.
+  const INBOX_TIME = /·\s*(now|\d+\s?[smhdwy])\s*$/i;
+  const FROM_YOU = /^You(:| sent| replied| reacted| liked)/;
+
+  function updateInboxStatus() {
+    if (!onInbox()) return;
+    for (const leaf of document.querySelectorAll('span')) {
+      if (leaf.childElementCount || !FROM_YOU.test(leaf.textContent.trim())) continue;
+      let line = leaf;
+      for (let i = 0; i < 4 && line && !INBOX_TIME.test(line.textContent.trim()); i++) line = line.parentElement;
+      if (!line) continue;
+      const text = line.textContent.trim();
+      const m = text.match(INBOX_TIME);
+      if (!m || !FROM_YOU.test(text)) continue;
+      const when = m[1].replace(/\s/g, '');
+      const status = /^now$/i.test(when) ? 'Sent just now' : `Sent ${when} ago`;
+      if (line.getAttribute('data-unreel-status') !== status) line.setAttribute('data-unreel-status', status);
+    }
+  }
+
+  // ---- Sharper previews of shared reels/posts in DMs -----------------------------
+  // The page offers several sizes of each preview but picks a small one. Telling
+  // it the image is large makes it load the biggest size available.
+  function sharpenPreviews() {
+    if (!location.pathname.startsWith('/direct/')) return;
+    for (const img of document.querySelectorAll('img[srcset]')) {
+      if (img.getAttribute('sizes') !== '1080px') img.setAttribute('sizes', '1080px');
+    }
+  }
+
   // ---- Actions the app can trigger (Home Screen quick actions) ----------------
 
   window.__unreel = {
@@ -843,6 +1109,17 @@
     // Instagram's own bar stays laid out (so it keeps updating) but invisible.
     '.unreel-tabbar-on [data-unreel-sitenav] { opacity: 0 !important; pointer-events: none !important; }',
     '.unreel-has-tabbar body { padding-bottom: var(--unreel-tabbar-h, 50px) !important; }',
+    // DM inbox "Sent 21m ago" line drawn over the page's own text.
+    '[data-unreel-status] { font-size: 0 !important; }',
+    '[data-unreel-status] * { display: none !important; }',
+    '[data-unreel-status]::after { content: attr(data-unreel-status); font-size: 14px; opacity: 0.65; }',
+    // End of the feed: stop the endless loading once everything left is hidden.
+    '.unreel-feed-end [role="progressbar"], .unreel-feed-end [data-visualcompletion="loading-state"], .unreel-feed-end svg[aria-label^="Loading"] { display: none !important; }',
+    '#unreel-caught-up { text-align: center; padding: 40px 24px 60px; color: #f5f5f5; }',
+    '@media (prefers-color-scheme: light) { #unreel-caught-up { color: #000; } }',
+    '#unreel-caught-up .unreel-check { width: 64px; height: 64px; margin: 0 auto 14px; border-radius: 50%; border: 2px solid currentColor; display: flex; align-items: center; justify-content: center; font-size: 30px; opacity: 0.9; }',
+    '#unreel-caught-up .unreel-title { font-size: 20px; font-weight: 600; }',
+    '#unreel-caught-up .unreel-sub { font-size: 14px; opacity: 0.6; margin-top: 6px; }',
     // Feed header: + left, logo centered, heart stays right.
     '.unreel-feed-header [data-unreel-header] { position: relative !important; }',
     '.unreel-feed-header [data-unreel-brand] { position: absolute !important; left: 50% !important; top: 50% !important; transform: translate(-50%, -50%) scale(1.1) !important; margin: 0 !important; }',
@@ -862,6 +1139,8 @@
   // Paint <html> with Instagram's background so any area that isn't drawn yet
   // (page changes, keyboard closing) shows that color instead of a white flash.
   function paintBackground(color) {
+    // A color saved in the other mode (e.g. dark, now in light) would be wrong.
+    if (color && isDarkColor(color) !== prefersDark()) return;
     if (color) document.documentElement.style.backgroundColor = color;
   }
 
@@ -878,12 +1157,7 @@
   function sweep() {
     const path = location.pathname;
 
-    if (cfg.blockFeedReels && path === '/') {
-      document.querySelectorAll('article:not([data-unreel])').forEach((post) => {
-        post.dataset.unreel = '1';
-        if (post.querySelector(REEL_LINK)) post.style.display = 'none';
-      });
-    }
+    if (path === '/') updateFeed();
 
     // Explore: keep the search box and results, hide the endless grid of posts
     // (and its loading spinner, which would otherwise spin forever).
@@ -910,6 +1184,7 @@
     // Keep the tab bar in step with the page in the same frame (no flicker).
     updateTabBar();
     updateHeader();
+    updateInboxStatus();
 
 
     // Fallback in case a navigation slipped past the history hooks.
@@ -922,6 +1197,8 @@
     reportTheme();
     updateTabBar(true);
     updateViewerSearch();
+    updateStories();
+    sharpenPreviews();
 
     const video = document.querySelector('video') ? viewerVideo() : null;
     if (video) {
@@ -963,7 +1240,15 @@
       const c = getComputedStyle(el).backgroundColor;
       return c && c !== 'transparent' && !/rgba\(.*,\s*0\)$/.test(c) ? c : null;
     };
-    const color = bg(document.body) || bg(document.documentElement);
+    let color = bg(document.body);
+    if (!color) {
+      // Read <html>'s own color, not the one we painted on it.
+      const html = document.documentElement;
+      const ours = html.style.backgroundColor;
+      html.style.backgroundColor = '';
+      color = bg(html);
+      html.style.backgroundColor = ours;
+    }
     if (color && color !== lastTheme) {
       lastTheme = color;
       paintBackground(color);

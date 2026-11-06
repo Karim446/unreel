@@ -14,10 +14,13 @@ struct ContentView: View {
             Color(uiColor: store.pageColor).ignoresSafeArea()
 
             InstagramWebView(webView: store.webView)
-                .ignoresSafeArea(.keyboard)   // the container makes room for the keyboard itself
                 .opacity(store.hasLoaded ? 1 : 0)
             .animation(.easeOut(duration: 0.25), value: store.hasLoaded)
         }
+        // The whole screen ignores the keyboard; WebContainerView makes room for it
+        // itself in one instant step. (Ignoring it on the web view alone still let
+        // SwiftUI slide the screen around during the keyboard animation.)
+        .ignoresSafeArea(.keyboard)
         .onAppear {
             guard !didLoad else { return }
             didLoad = true

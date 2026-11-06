@@ -89,7 +89,7 @@ final class WebViewStore: NSObject, ObservableObject, WKNavigationDelegate, WKUI
         appliedConfig = config
 
         // Last known Instagram background, so the page never starts out white.
-        let bg = UserDefaults.standard.string(forKey: "pageColorCSS")
+        let bg = UserDefaults.standard.string(forKey: Self.pageColorKey(for: UITraitCollection.current))
             .map { "window.__UNREEL_BG__ = \"\($0)\";" } ?? ""
 
         let ucc = webView.configuration.userContentController
@@ -228,7 +228,7 @@ final class WebViewStore: NSObject, ObservableObject, WKNavigationDelegate, WKUI
         guard message.name == "theme", let css = message.body as? String,
               let color = Self.parseCSSColor(css) else { return }
         applyPageColor(color)
-        UserDefaults.standard.set(css, forKey: "pageColorCSS")
+        UserDefaults.standard.set(css, forKey: Self.pageColorKey(for: webView.traitCollection))
     }
 
     private func applyPageColor(_ color: UIColor) {
@@ -238,8 +238,15 @@ final class WebViewStore: NSObject, ObservableObject, WKNavigationDelegate, WKUI
         webView.underPageBackgroundColor = color
     }
 
+    /// Light and dark mode each remember their own page color.
+    private static func pageColorKey(for traits: UITraitCollection) -> String {
+        traits.userInterfaceStyle == .dark ? "pageColorCSS-dark" : "pageColorCSS-light"
+    }
+
     private static func savedPageColor() -> UIColor? {
-        UserDefaults.standard.string(forKey: "pageColorCSS").flatMap(parseCSSColor)
+        UserDefaults.standard.string(forKey: pageColorKey(for: UITraitCollection.current)).flatMap(parseCSSColor)
+            ?? (UITraitCollection.current.userInterfaceStyle == .dark
+                ? UIColor(red: 12 / 255, green: 16 / 255, blue: 20 / 255, alpha: 1) : .white)
     }
 
     /// Parses "rgb(12, 16, 20)" / "rgba(12, 16, 20, 1)".
