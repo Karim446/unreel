@@ -1,6 +1,7 @@
 import UIKit
 
 /// Native haptic taps requested by filter.js.
+@MainActor
 enum Haptics {
     private static let light = UIImpactFeedbackGenerator(style: .light)
     private static let medium = UIImpactFeedbackGenerator(style: .medium)

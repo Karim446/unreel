@@ -159,7 +159,7 @@ final class WebViewStore: NSObject, ObservableObject, WKNavigationDelegate, WKUI
 
         switch pan.state {
         case .began:
-            UIApplication.shared.sendAction(#selector(UIResponder.resignFirstResponder), to: nil, from: nil, for: nil)
+            _ = UIApplication.shared.sendAction(#selector(UIResponder.resignFirstResponder), to: nil, from: nil, for: nil)
         case .changed:
             webView.transform = CGAffineTransform(translationX: dx, y: 0)
             webView.alpha = 1 - (dx / width) * 0.35
@@ -174,7 +174,7 @@ final class WebViewStore: NSObject, ObservableObject, WKNavigationDelegate, WKUI
                     self.webView.goBack()
                     self.webView.transform = .identity
                     self.webView.alpha = 0
-                    UIView.animate(withDuration: 0.18, delay: 0.05) { self.webView.alpha = 1 }
+                    UIView.animate(withDuration: 0.18, delay: 0.05, options: []) { self.webView.alpha = 1 }
                 }
             } else {
                 snapBack()
@@ -217,7 +217,7 @@ final class WebViewStore: NSObject, ObservableObject, WKNavigationDelegate, WKUI
                     // Leaving a chat: close the keyboard instantly so the page doesn't
                     // re-layout through the whole keyboard animation.
                     UIView.performWithoutAnimation {
-                        UIApplication.shared.sendAction(#selector(UIResponder.resignFirstResponder), to: nil, from: nil, for: nil)
+                        _ = UIApplication.shared.sendAction(#selector(UIResponder.resignFirstResponder), to: nil, from: nil, for: nil)
                     }
                 }
             }

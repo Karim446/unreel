@@ -425,6 +425,95 @@
     if (el && el.matches && el.matches(TEXT_BOX)) enablePredictive(el);
   }, true);
 
+  // ---- Bottom tab bar in the DM inbox ----------------------------------------
+  // The real app keeps its tab bar in the inbox; Instagram's mobile site hides it.
+  // We remember your profile link and photo from the site's own bar, then show
+  // a matching bar on the inbox (not inside a chat, same as the app).
+
+  const ICONS = {
+    home: '<path d="M3 10.5 12 3l9 7.5V20a1 1 0 0 1-1 1h-5v-6h-6v6H4a1 1 0 0 1-1-1z" fill="none" stroke="currentColor" stroke-width="2" stroke-linejoin="round"/>',
+    search: '<circle cx="10.5" cy="10.5" r="6.5" fill="none" stroke="currentColor" stroke-width="2"/><path d="m15.5 15.5 5 5" stroke="currentColor" stroke-width="2" stroke-linecap="round"/>',
+    messages: '<path d="M21 3 3 10.2l7.2 2.6L13 21z" fill="currentColor" stroke="currentColor" stroke-width="2" stroke-linejoin="round"/><path d="m10.2 12.8 4.3-4.3" stroke="var(--unreel-tab-bg)" stroke-width="2" stroke-linecap="round"/>',
+  };
+
+  let profileLink = null;
+  let profilePhoto = null;
+
+  // Learn the profile link/photo from Instagram's own bottom bar whenever it's on screen.
+  function learnFromSiteNav() {
+    let navLinks = 0;
+    for (const a of document.querySelectorAll('a[href]')) {
+      if (a.closest('#unreel-tabbar')) continue;
+      const r = a.getBoundingClientRect();
+      if (!(r.height > 0 && r.top > window.innerHeight - 90)) continue;
+      const href = a.getAttribute('href');
+      if (href === '/' || href === '/explore/') navLinks++;
+      const img = a.querySelector('img');
+      if (img && /^\/[^/]+\/$/.test(href) && !href.startsWith('/direct')) {
+        profileLink = href;
+        profilePhoto = img.src;
+      }
+    }
+    return navLinks > 0;   // the site's own bar is on screen
+  }
+
+  const onInbox = () => /^\/direct\/(inbox|requests|general)?\/?$/.test(location.pathname) ||
+    location.pathname.startsWith('/direct/inbox');
+
+  function navigateTo(href) {
+    haptic('selection');
+    const before = location.pathname;
+    history.pushState({}, '', href);
+    window.dispatchEvent(new PopStateEvent('popstate', { state: {} }));
+    check(before);
+    // If Instagram's router didn't pick that up, load the page normally.
+    setTimeout(() => {
+      if (document.getElementById('unreel-tabbar') && location.pathname === new URL(href, location.href).pathname && onInboxContent()) {
+        location.assign(href);
+      }
+    }, 900);
+  }
+  const onInboxContent = () => document.querySelectorAll('a[href^="/direct/t/"], [role="listitem"] a[href*="/direct/"]').length > 0;
+
+  function updateTabBar() {
+    const siteNavVisible = learnFromSiteNav();
+    const want = onInbox() && !siteNavVisible;
+    let bar = document.getElementById('unreel-tabbar');
+    document.documentElement.classList.toggle('unreel-has-tabbar', want);
+    if (!want) { if (bar) bar.remove(); return; }
+    if (bar) return;
+
+    bar = document.createElement('div');
+    bar.id = 'unreel-tabbar';
+    const item = (key, href, inner, active) => {
+      const el = document.createElement('a');
+      el.href = href;
+      el.className = 'unreel-tab' + (active ? ' active' : '');
+      el.innerHTML = inner;
+      el.addEventListener('click', (e) => {
+        e.preventDefault();
+        if (!active) navigateTo(href);
+      });
+      return el;
+    };
+    const svg = (paths) => `<svg viewBox="0 0 24 24" width="26" height="26">${paths}</svg>`;
+    bar.appendChild(item('home', '/', svg(ICONS.home), false));
+    bar.appendChild(item('search', '/explore/', svg(ICONS.search), false));
+    bar.appendChild(item('messages', INBOX, svg(ICONS.messages), true));
+    if (profileLink) {
+      const avatar = profilePhoto
+        ? `<img src="${profilePhoto}" alt="" class="unreel-avatar">`
+        : svg('<circle cx="12" cy="8" r="4" fill="none" stroke="currentColor" stroke-width="2"/><path d="M4 21c1.5-4 4.5-6 8-6s6.5 2 8 6" fill="none" stroke="currentColor" stroke-width="2"/>');
+      bar.appendChild(item('profile', profileLink, avatar, false));
+    }
+    const bg = lastTheme || 'rgb(12,16,20)';
+    const [r, g, b] = (bg.match(/[\d.]+/g) || [12, 16, 20]).map(Number);
+    bar.style.setProperty('--unreel-tab-bg', bg);
+    bar.style.color = (0.299 * r + 0.587 * g + 0.114 * b) < 128 ? '#f5f5f5' : '#000';
+    document.body.appendChild(bar);
+  }
+
+
   // ---- Actions the app can trigger (Home Screen quick actions) ----------------
 
   window.__unreel = {
@@ -447,6 +536,12 @@
     // Explore with the grid hidden: no endless loading spinner. Hiding it also stops
     // Instagram from fetching more grid posts in the background.
     '.unreel-explore [role="progressbar"], .unreel-explore [data-visualcompletion="loading-state"], .unreel-explore svg[aria-label^="Loading"] { display: none !important; }',
+    // Inbox tab bar (styled like the app's).
+    '#unreel-tabbar { position: fixed; left: 0; right: 0; bottom: 0; height: 50px; z-index: 2147483000; display: flex; justify-content: space-around; align-items: center; background: var(--unreel-tab-bg); border-top: 0.5px solid rgba(127,127,127,0.25); }',
+    '.unreel-tab { flex: 1; display: flex; justify-content: center; align-items: center; height: 100%; color: inherit; opacity: 0.95; }',
+    '.unreel-tab svg { color: currentColor; }',
+    '.unreel-avatar { width: 26px; height: 26px; border-radius: 50%; object-fit: cover; }',
+    '.unreel-has-tabbar body { padding-bottom: 50px !important; }',
     // Feel like an app, not a web page: no grey tap flashes, no text-selection/callout menus.
     '* { -webkit-tap-highlight-color: transparent; }',
     'body { -webkit-touch-callout: none; -webkit-user-select: none; user-select: none; }',
@@ -511,6 +606,7 @@
   // (that was making scrolling and the keyboard animation stutter).
   function slowSweep() {
     reportTheme();
+    updateTabBar();
 
     const video = document.querySelector('video') ? viewerVideo() : null;
     if (video) {
