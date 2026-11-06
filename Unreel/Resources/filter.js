@@ -489,6 +489,25 @@
     }, 900);
   }
 
+  // Instagram's site never shows a selected Messages icon, so make one the way
+  // the app draws it: the paper plane filled in, with its fold line cut out.
+  function selectedMessagesIcon(html) {
+    const holder = document.createElement('div');
+    holder.innerHTML = html;
+    const svg = holder.querySelector('svg');
+    if (!svg) return html;
+    const bg = lastTheme || 'rgb(12,16,20)';
+    svg.querySelectorAll('polygon, path').forEach((shape) => {
+      if (shape.getAttribute('fill') === 'none' || shape.getAttribute('stroke')) {
+        shape.setAttribute('fill', 'currentColor');
+      }
+    });
+    svg.querySelectorAll('line').forEach((line) => {
+      line.setAttribute('stroke', bg);
+    });
+    return holder.innerHTML;
+  }
+
   function buildTabBar() {
     const wrap = document.createElement('div');
     wrap.id = 'unreel-tabbar';
@@ -503,7 +522,8 @@
       const href = a.getAttribute('href');
       const icon = savedNav.icons[href] || {};
       const isMessages = href.startsWith('/direct');
-      const html = isMessages ? (icon.on || icon.off) : (icon.off || icon.on);
+      let html = isMessages ? (icon.on || icon.off) : (icon.off || icon.on);
+      if (isMessages && !icon.on && html) html = selectedMessagesIcon(html);
       if (html) a.innerHTML = html;
     }
 
@@ -618,6 +638,9 @@
     }
 
     document.querySelectorAll(TEXT_BOX).forEach(enablePredictive);
+
+    // Swap in the inbox tab bar in the same frame the site's own bar disappears.
+    if (onInbox() || document.getElementById('unreel-tabbar')) updateTabBar();
 
 
     // Fallback in case a navigation slipped past the history hooks.
