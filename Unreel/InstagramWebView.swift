@@ -28,8 +28,14 @@ final class WebContainerView: UIView {
     var bottomInset: CGFloat = 0 {
         didSet {
             guard bottomInset != oldValue else { return }
-            setNeedsLayout()
-            layoutIfNeeded()   // apply now, synchronously
+            // iOS runs keyboard notifications inside the keyboard's own animation,
+            // so without this the resize gets animated too. WebKit then plays its
+            // own resize animation (the page dipped down and came back up). Apply
+            // it instantly instead.
+            UIView.performWithoutAnimation {
+                setNeedsLayout()
+                layoutIfNeeded()
+            }
         }
     }
 

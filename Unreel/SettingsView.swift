@@ -3,6 +3,11 @@ import SwiftUI
 struct SettingsView: View {
     @EnvironmentObject private var settings: FilterSettings
     @Environment(\.dismiss) private var dismiss
+    var openEditProfile: () -> Void
+
+    init(openEditProfile: @escaping () -> Void = {}) {
+        self.openEditProfile = openEditProfile
+    }
 
     var body: some View {
         NavigationStack {
@@ -18,6 +23,15 @@ struct SettingsView: View {
                     Toggle("Hide the Explore grid", isOn: $settings.hideExploreGrid)
                 } footer: {
                     Text("Search still works, so you can find people and accounts.")
+                }
+                Section("Extras") {
+                    NavigationLink("App Icon") { AppIconPicker() }
+                    NavigationLink("Bio Fonts") {
+                        FancyTextView {
+                            dismiss()
+                            openEditProfile()
+                        }
+                    }
                 }
                 Section {
                     NavigationLink("Set up Instagram redirect") { SetupGuideView() }

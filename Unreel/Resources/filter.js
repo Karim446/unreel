@@ -563,6 +563,9 @@
     if (live) fire(live); else navigateTo(href);
   }
 
+  // Sizes measured from the real app: a 48-pt bar, 22-pt icons, 24-pt profile photo.
+  const TAB_BAR_HEIGHT = 48;
+
   let lastSig = '';
   let lastWanted = 0;
   let graceTimer = null;
@@ -608,13 +611,206 @@
     const bg = savedNav.background && !/rgba\(.*,\s*0\)$/.test(savedNav.background) && savedNav.background !== 'transparent'
       ? savedNav.background : (lastTheme || 'rgb(12,16,20)');
     const [r, g, b] = (bg.match(/[\d.]+/g) || [12, 16, 20]).map(Number);
-    bar.style.height = `${savedNav.height}px`;
+    bar.style.height = `${TAB_BAR_HEIGHT}px`;
     bar.style.background = bg;
     bar.style.borderTop = savedNav.borderTop || '';
     bar.style.color = (0.299 * r + 0.587 * g + 0.114 * b) < 128 ? '#f5f5f5' : '#000';
-    document.documentElement.style.setProperty('--unreel-tabbar-h', `${savedNav.height}px`);
+    document.documentElement.style.setProperty('--unreel-tabbar-h', `${TAB_BAR_HEIGHT}px`);
     bar.innerHTML = icons.map((i) => `<a class="unreel-tab" href="${i.href}">${i.html}</a>`).join('');
   }
+
+  // ---- Search your Story viewer list --------------------------------------
+  // Adds a search box to the "Viewers" sheet on your own Story. Typing loads the
+  // whole list (Instagram only loads it as you scroll) and filters it by
+  // username or name.
+
+  const PROFILE_HREF = /^\/[^/]+\/$/;
+
+  function findViewersPanel() {
+    if (!location.pathname.startsWith('/stories/')) return null;
+    for (const d of document.querySelectorAll('[role="dialog"]')) {
+      if (d.querySelector('video')) continue;
+      const heading = (d.querySelector('h1, h2, h3, [role="heading"]') || {}).textContent || '';
+      const profiles = [...d.querySelectorAll('a[href]')].filter((a) => PROFILE_HREF.test(a.getAttribute('href')) && a.querySelector('img'));
+      if (/viewer|seen by|activity/i.test(heading) || profiles.length >= 3) return d;
+    }
+    return null;
+  }
+
+  function viewersScroller(panel) {
+    let best = null;
+    for (const el of panel.querySelectorAll('*')) {
+      const oy = getComputedStyle(el).overflowY;
+      if ((oy === 'auto' || oy === 'scroll') && el.scrollHeight > el.clientHeight + 4) {
+        if (!best || el.scrollHeight > best.scrollHeight) best = el;
+      }
+    }
+    return best;
+  }
+
+  const rowCache = new WeakMap();
+  function viewerRows(scroller) {
+    const rows = new Map();
+    for (const a of scroller.querySelectorAll('a[href]')) {
+      const href = a.getAttribute('href');
+      if (!PROFILE_HREF.test(href)) continue;
+      let row = rowCache.get(a);
+      if (!row) {
+        row = a;
+        while (row.parentElement && row.parentElement !== scroller) {
+          const others = [...row.parentElement.querySelectorAll('a[href]')]
+            .map((x) => x.getAttribute('href'))
+            .filter((h) => PROFILE_HREF.test(h) && h !== href);
+          if (others.length) break;   // the parent holds another person: stop here
+          row = row.parentElement;
+        }
+        rowCache.set(a, row);
+      }
+      rows.set(row, href.slice(1, -1).toLowerCase());
+    }
+    return rows;
+  }
+
+  function filterViewers(panel) {
+    const input = panel.querySelector('#unreel-viewer-search input');
+    const scroller = panel.__unreelScroller;
+    if (!input || !scroller) return;
+    const q = input.value.trim().toLowerCase();
+    let shown = 0;
+    viewerRows(scroller).forEach((username, row) => {
+      const match = !q || username.includes(q) || row.textContent.toLowerCase().includes(q);
+      row.style.display = match ? '' : 'none';
+      if (match) shown++;
+    });
+    const status = panel.querySelector('#unreel-viewer-status');
+    if (status && !panel.__unreelLoading) status.textContent = q ? (shown ? '' : 'No viewer matches') : '';
+  }
+
+  // Scroll the list to the end until no more viewers load.
+  async function loadAllViewers(panel) {
+    const scroller = panel.__unreelScroller;
+    if (!scroller || panel.__unreelLoaded || panel.__unreelLoading) return;
+    panel.__unreelLoading = true;
+    const status = panel.querySelector('#unreel-viewer-status');
+    if (status) status.textContent = 'Loading all viewers…';
+    let lastHeight = -1;
+    let still = 0;
+    while (still < 3 && panel.isConnected) {
+      scroller.scrollTop = scroller.scrollHeight;
+      await sleep(350);
+      if (scroller.scrollHeight === lastHeight) still++; else { still = 0; lastHeight = scroller.scrollHeight; }
+    }
+    scroller.scrollTop = 0;
+    panel.__unreelLoading = false;
+    panel.__unreelLoaded = true;
+    filterViewers(panel);
+  }
+
+  function updateViewerSearch() {
+    const panel = findViewersPanel();
+    if (!panel) return;
+    if (!panel.querySelector('#unreel-viewer-search')) {
+      const scroller = viewersScroller(panel);
+      if (!scroller) return;
+      panel.__unreelScroller = scroller;
+      const box = document.createElement('div');
+      box.id = 'unreel-viewer-search';
+      box.innerHTML = '<input type="search" placeholder="Search viewers" autocomplete="off" autocorrect="off" autocapitalize="off" spellcheck="false"><div id="unreel-viewer-status"></div>';
+      scroller.parentElement.insertBefore(box, scroller);
+      const input = box.querySelector('input');
+      input.addEventListener('input', () => {
+        filterViewers(panel);
+        if (input.value.trim()) loadAllViewers(panel);
+      });
+    } else {
+      filterViewers(panel);   // keep newly loaded rows filtered
+    }
+  }
+
+  // ---- Feed header layout like the app ----------------------------------------
+  // The app puts + on the left, the Instagram logo in the middle and the heart on
+  // the right. The mobile site has the logo on the left and + next to the heart.
+  // We tag the pieces and reposition them with CSS (nothing is removed, so all
+  // three still work).
+
+  function updateHeader() {
+    const onFeed = location.pathname === '/';
+    document.documentElement.classList.toggle('unreel-feed-header', onFeed);
+    if (!onFeed) return;
+    const existing = document.querySelector('[data-unreel-header]');
+    if (existing && existing.isConnected && existing.querySelector('[data-unreel-newpost]')) return;
+
+    const logo = [...document.querySelectorAll('svg[aria-label="Instagram"]')]
+      .find((svg) => svg.getBoundingClientRect().top < 140);
+    const plus = [...document.querySelectorAll('svg[aria-label="New post"]')]
+      .find((svg) => svg.getBoundingClientRect().top < 140);
+    if (!logo || !plus) return;
+
+    // The header row: the closest element that holds both the logo and the +.
+    let row = logo.parentElement;
+    while (row && !row.contains(plus)) row = row.parentElement;
+    if (!row || row === document.body) return;
+
+    // The pieces to move: the logo's whole group (logo + dropdown arrow), and
+    // just the + button (not the heart next to it).
+    let brand = logo;
+    while (brand.parentElement && brand.parentElement !== row) brand = brand.parentElement;
+    let newPost = plus;
+    while (newPost.parentElement && newPost.parentElement !== row &&
+           newPost.parentElement.querySelectorAll('svg').length === 1) {
+      newPost = newPost.parentElement;
+    }
+    if (brand === newPost) return;
+
+    row.setAttribute('data-unreel-header', '');
+    brand.setAttribute('data-unreel-brand', '');
+    newPost.setAttribute('data-unreel-newpost', '');
+  }
+
+  // ---- Haptic when double-tapping a message to react ----------------------
+  // Instagram reacts with a heart when you double-tap a message; the app gives a
+  // tap of feedback at the same moment. We do the same: a double-tap on a
+  // message bubble in a chat plays a haptic right away. If the message list
+  // can't be found, we wait for the new heart reaction to appear instead.
+
+  function messagesArea() {
+    return document.querySelector('[aria-label^="Messages in conversation"], [aria-label*="Conversation with"], [role="grid"]');
+  }
+
+  const countHearts = (root) =>
+    [...root.querySelectorAll('img[alt="❤"], img[alt="❤️"], span, div')]
+      .filter((el) => el.childElementCount === 0 && /^\s*(❤️?|♥️?)\s*\d*\s*$/.test(el.textContent || el.alt || '')).length;
+
+  let lastMessageTap = null;
+  window.addEventListener('touchend', (e) => {
+    if (!location.pathname.startsWith('/direct/t/') || e.changedTouches.length !== 1 || e.touches.length) return;
+    const t = e.changedTouches[0];
+    const target = e.target.closest ? e.target : e.target.parentElement;
+    if (!target || target.closest('input, textarea, [contenteditable="true"], a[href], button')) { lastMessageTap = null; return; }
+
+    const now = Date.now();
+    const isDouble = lastMessageTap && now - lastMessageTap.time < 350 &&
+      Math.hypot(t.clientX - lastMessageTap.x, t.clientY - lastMessageTap.y) < 40;
+    if (!isDouble) { lastMessageTap = { time: now, x: t.clientX, y: t.clientY }; return; }
+    lastMessageTap = null;
+
+    const area = messagesArea();
+    if (area) {
+      // Only on an actual message (something with text or an image), not empty space.
+      if (area.contains(target) && (target.textContent.trim() || target.querySelector('img') || target.tagName === 'IMG')) {
+        haptic('medium');
+      }
+      return;
+    }
+
+    // Fallback: confirm a heart reaction showed up before buzzing.
+    const before = countHearts(document.body);
+    let checks = 0;
+    const watch = setInterval(() => {
+      if (countHearts(document.body) > before) { clearInterval(watch); haptic('medium'); }
+      else if (++checks > 8) clearInterval(watch);
+    }, 60);
+  }, { capture: true, passive: true });
 
   // ---- Actions the app can trigger (Home Screen quick actions) ----------------
 
@@ -642,9 +838,20 @@
     '#unreel-tabbar { position: fixed; left: 0; right: 0; bottom: 0; z-index: 2147483000; display: flex; align-items: stretch; }',
     '.unreel-tab { flex: 1 1 0; display: flex; align-items: center; justify-content: center; color: inherit; text-decoration: none; }',
     '.unreel-tab > * { pointer-events: none; }',
+    '.unreel-tab svg { width: 22px !important; height: 22px !important; }',
+    '.unreel-tab img { width: 24px !important; height: 24px !important; border-radius: 50%; }',
     // Instagram's own bar stays laid out (so it keeps updating) but invisible.
     '.unreel-tabbar-on [data-unreel-sitenav] { opacity: 0 !important; pointer-events: none !important; }',
     '.unreel-has-tabbar body { padding-bottom: var(--unreel-tabbar-h, 50px) !important; }',
+    // Feed header: + left, logo centered, heart stays right.
+    '.unreel-feed-header [data-unreel-header] { position: relative !important; }',
+    '.unreel-feed-header [data-unreel-brand] { position: absolute !important; left: 50% !important; top: 50% !important; transform: translate(-50%, -50%) scale(1.1) !important; margin: 0 !important; }',
+    '.unreel-feed-header [data-unreel-newpost] { position: absolute !important; left: 16px !important; top: 50% !important; transform: translateY(-50%) !important; margin: 0 !important; }',
+    // Story viewer search box.
+    '#unreel-viewer-search { padding: 8px 16px 6px; }',
+    '#unreel-viewer-search input { width: 100%; box-sizing: border-box; height: 36px; border: 0; border-radius: 10px; padding: 0 12px; font-size: 16px; color: inherit; background: rgba(127,127,127,0.2); outline: none; -webkit-user-select: text; user-select: text; }',
+    '#unreel-viewer-status { font-size: 13px; opacity: 0.6; padding-top: 6px; min-height: 0; }',
+    '#unreel-viewer-status:empty { display: none; }',
     // Feel like an app, not a web page: no grey tap flashes, no text-selection/callout menus.
     '* { -webkit-tap-highlight-color: transparent; }',
     'body { -webkit-touch-callout: none; -webkit-user-select: none; user-select: none; }',
@@ -702,6 +909,7 @@
 
     // Keep the tab bar in step with the page in the same frame (no flicker).
     updateTabBar();
+    updateHeader();
 
 
     // Fallback in case a navigation slipped past the history hooks.
@@ -713,6 +921,7 @@
   function slowSweep() {
     reportTheme();
     updateTabBar(true);
+    updateViewerSearch();
 
     const video = document.querySelector('video') ? viewerVideo() : null;
     if (video) {

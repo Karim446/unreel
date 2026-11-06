@@ -44,7 +44,9 @@ struct ContentView: View {
         .sheet(isPresented: $router.showSettings, onDismiss: {
             store.apply(settings, reloadIfChanged: true)
         }) {
-            SettingsView()
+            SettingsView(openEditProfile: {
+                store.webView.load(URLRequest(url: URL(string: "accounts/edit/", relativeTo: WebViewStore.home)!))
+            })
         }
         .sheet(isPresented: $showSetup, onDismiss: { settings.hasSeenSetup = true }) {
             NavigationStack { SetupGuideView() }
