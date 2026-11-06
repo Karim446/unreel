@@ -27,7 +27,7 @@ struct SettingsView: View {
                     Toggle("Hide ads", isOn: $settings.hideAds)
                     Toggle("Hide my online status", isOn: $settings.hideOnline)
                 } footer: {
-                    Text("Search still works with the Explore grid hidden. Hiding ads removes sponsored posts from the feed and skips sponsored Stories. Hiding your online status stops sending "Active now" and "typing…" while you still see others'.")
+                    Text("Search still works with the Explore grid hidden. Hiding ads removes sponsored posts from the feed and skips sponsored Stories. Hiding your online status stops sending \"Active now\" and \"typing…\" while you still see others'.")
                 }
                 Section {
                     NavigationLink("App Icon") { AppIconPicker() }
