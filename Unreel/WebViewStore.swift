@@ -26,7 +26,6 @@ final class WebViewStore: NSObject, ObservableObject, WKNavigationDelegate, WKUI
     private var appliedConfig: String?
     private let refreshControl = UIRefreshControl()
     private var urlObserver: NSKeyValueObservation?
-    private var offsetObserver: NSKeyValueObservation?
     private var jsAfterLoad: [String] = []
 
     override init() {
@@ -77,18 +76,6 @@ final class WebViewStore: NSObject, ObservableObject, WKNavigationDelegate, WKUI
         // Remember where you are so the next launch resumes there.
         urlObserver = webView.observe(\.url, options: [.new]) { wv, _ in
             Task { @MainActor in Self.rememberLocation(wv.url) }
-        }
-
-        // In chats, keep the page itself from scrolling when the keyboard opens.
-        // WebKit nudges the whole page up to reveal the message box while the view
-        // is also shrinking for the keyboard, which made the chat jump and settle.
-        // Chats scroll inside their own message list, so the page never needs to.
-        offsetObserver = webView.scrollView.observe(\.contentOffset, options: [.new]) { [weak self] scrollView, _ in
-            MainActor.assumeIsolated {
-                guard let self, self.inChat else { return }
-                let rest = CGPoint(x: 0, y: -scrollView.adjustedContentInset.top)
-                if scrollView.contentOffset != rest { scrollView.contentOffset = rest }
-            }
         }
 
         // Never leave the screen blank if the first load stalls.

@@ -6,6 +6,10 @@ struct UnreelApp: App {
     @UIApplicationDelegateAdaptor(AppDelegate.self) private var appDelegate
     @StateObject private var settings = FilterSettings()
 
+    init() {
+        KeyboardTracker.shared.start()   // before any web view exists, so it runs first
+    }
+
     var body: some Scene {
         WindowGroup {
             ContentView()

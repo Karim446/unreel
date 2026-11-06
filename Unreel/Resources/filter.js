@@ -564,14 +564,29 @@
   }
 
   let lastSig = '';
+  let lastWanted = 0;
+  let graceTimer = null;
   function updateTabBar(capture = false) {
     const nav = findSiteNav();
     if (nav && (capture || !savedNav)) captureSiteNav(nav);   // copying is done on the slower pass
 
-    const want = !!(savedNav && savedNav.items && savedNav.items.length && (nav || onInbox()));
+    let want = !!(savedNav && savedNav.items && savedNav.items.length && (nav || onInbox()));
+    let bar = document.getElementById('unreel-tabbar');
+
+    // Going from one tab to another (e.g. inbox → profile), there are a few frames
+    // where the old page is gone and the new page hasn't drawn its bar yet. Keep
+    // ours up through that gap instead of blinking. Opening a chat still hides it
+    // right away, like the app.
+    if (want) {
+      lastWanted = Date.now();
+    } else if (bar && !location.pathname.startsWith('/direct/t/') && Date.now() - lastWanted < 700) {
+      want = true;
+      clearTimeout(graceTimer);
+      graceTimer = setTimeout(() => updateTabBar(), 120);
+    }
+
     document.documentElement.classList.toggle('unreel-tabbar-on', want);
     document.documentElement.classList.toggle('unreel-has-tabbar', want && !nav);   // make room only where the site doesn't
-    let bar = document.getElementById('unreel-tabbar');
     if (!want) {
       if (bar) bar.remove();
       lastSig = '';
