@@ -436,6 +436,13 @@
   let savedNav = (() => {
     try { return JSON.parse(localStorage.getItem(NAV_KEY)) || null; } catch (_) { return null; }
   })();
+  // Instagram never shows a real selected Messages icon; drop any bad copy saved
+  // by an earlier version (it was the unselected icon caught mid page-change).
+  if (savedNav && savedNav.icons) {
+    for (const href of Object.keys(savedNav.icons)) {
+      if (href.startsWith('/direct')) delete savedNav.icons[href].on;
+    }
+  }
 
   // The site's bottom bar: the full-width, short block around its Home/Search links.
   function findSiteNav() {
@@ -455,8 +462,11 @@
   }
 
   function captureSiteNav(nav) {
-    const icons = (savedNav && savedNav.icons) || {};
     const path = location.pathname;
+    // While opening DMs the URL changes a moment before the site's bar disappears;
+    // copying it then would save the wrong icons, so only copy outside DMs.
+    if (path.startsWith('/direct')) return;
+    const icons = (savedNav && savedNav.icons) || {};
     for (const a of nav.querySelectorAll('a[href]')) {
       const href = a.getAttribute('href');
       const selected = href === '/' ? path === '/' : path.startsWith(href);
