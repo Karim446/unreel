@@ -13,7 +13,10 @@ struct ContentView: View {
             // Fills the status-bar and home-indicator areas with Instagram's own background color.
             Color(uiColor: store.pageColor).ignoresSafeArea()
 
+            // Let WebKit handle the keyboard on its own, like Safari. If SwiftUI also
+            // resizes the view, both fight over the layout and the animation stutters.
             InstagramWebView(webView: store.webView)
+                .ignoresSafeArea(.keyboard)
                 .opacity(store.hasLoaded ? 1 : 0)
                 .animation(.easeOut(duration: 0.25), value: store.hasLoaded)
         }

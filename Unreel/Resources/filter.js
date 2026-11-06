@@ -248,24 +248,96 @@
     if (control.tagName === 'A' && (control.closest('nav') || r.top > window.innerHeight - 90)) haptic('selection');
   }, true);
 
-  // Double-tap on a post's photo or video (Instagram likes it).
+  // Double-tap a post's photo or video to like it, with a heart pop like the app.
+  // (Instagram's mobile site doesn't do this itself.)
+  function mediaAt(x, y) {
+    for (const el of document.elementsFromPoint(x, y)) {
+      if ((el.tagName === 'IMG' || el.tagName === 'VIDEO') && el.getBoundingClientRect().width > window.innerWidth * 0.5) {
+        return el;
+      }
+    }
+    return null;
+  }
+
+  function postLikeIcon(media) {
+    const scope = media.closest('article') || document;
+    const mediaBottom = media.getBoundingClientRect().bottom;
+    for (const icon of scope.querySelectorAll('svg[aria-label="Like"], svg[aria-label="Unlike"]')) {
+      const r = icon.getBoundingClientRect();
+      // The post's like button is the big heart just under the photo (comment hearts are tiny).
+      if (r.width >= 20 && r.top >= mediaBottom - 10) return icon;
+    }
+    return null;
+  }
+
+  function showHeart(media) {
+    const r = media.getBoundingClientRect();
+    const size = Math.min(110, r.width * 0.3);
+    const heart = document.createElement('div');
+    heart.innerHTML = `<svg viewBox="0 0 24 24" width="${size}" height="${size}"><path fill="#fff" d="M12 21.2s-7.6-4.7-10.1-9.4C.3 8.5 2.2 4.4 6.1 4.4c2.3 0 3.7 1.3 5.9 3.6 2.2-2.3 3.6-3.6 5.9-3.6 3.9 0 5.8 4.1 4.2 7.4C19.6 16.5 12 21.2 12 21.2z"/></svg>`;
+    Object.assign(heart.style, {
+      position: 'fixed',
+      left: `${r.left + r.width / 2 - size / 2}px`,
+      top: `${r.top + r.height / 2 - size / 2}px`,
+      pointerEvents: 'none',
+      zIndex: '2147483647',
+      filter: 'drop-shadow(0 2px 10px rgba(0,0,0,0.35))',
+      transform: 'scale(0.2)',
+      opacity: '0',
+    });
+    document.body.appendChild(heart);
+    heart.animate(
+      [
+        { transform: 'scale(0.2)', opacity: 0 },
+        { transform: 'scale(1.15)', opacity: 1, offset: 0.25 },
+        { transform: 'scale(1)', opacity: 1, offset: 0.4 },
+        { transform: 'scale(1)', opacity: 1, offset: 0.75 },
+        { transform: 'scale(0.9)', opacity: 0 },
+      ],
+      { duration: 800, easing: 'ease-out' }
+    ).onfinish = () => heart.remove();
+  }
+
   let lastTap = null;
   window.addEventListener('touchend', (e) => {
     if (e.touches.length || e.changedTouches.length !== 1) return;
     const t = e.changedTouches[0];
     const target = e.target.closest ? e.target : e.target.parentElement;
-    if (!target || !target.closest('article') || target.closest('button, [role="button"], a, input, textarea')) {
-      lastTap = null;
-      return;
-    }
+    if (!target || target.closest('input, textarea, [contenteditable="true"]')) { lastTap = null; return; }
+
     const now = Date.now();
-    if (lastTap && now - lastTap.time < 300 && Math.hypot(t.clientX - lastTap.x, t.clientY - lastTap.y) < 40) {
-      haptic('medium');
-      lastTap = null;
+    const isDouble = lastTap && now - lastTap.time < 320 && Math.hypot(t.clientX - lastTap.x, t.clientY - lastTap.y) < 40;
+    if (!isDouble) { lastTap = { time: now, x: t.clientX, y: t.clientY }; return; }
+    lastTap = null;
+
+    const media = mediaAt(t.clientX, t.clientY);
+    if (!media || viewerVideo() === media) return;   // not a post, or a full-screen reel
+    const icon = postLikeIcon(media);
+    if (!icon) return;
+
+    showHeart(media);
+    if (icon.getAttribute('aria-label') === 'Like') {
+      fire(pressable(icon));        // the click handler above plays the haptic
     } else {
-      lastTap = { time: now, x: t.clientX, y: t.clientY };
+      haptic('medium');             // already liked: just the pop, like the app
     }
   }, { capture: true, passive: true });
+
+  // ---- Keyboard: predictive text and emoji suggestions -----------------------
+  // Instagram's site turns autocorrect off on its text boxes, which also hides
+  // iOS's suggestion bar (including emoji suggestions). Turn it back on.
+  const TEXT_BOX = 'textarea:not([data-unreel-kb]), [contenteditable="true"]:not([data-unreel-kb])';
+  function enablePredictive(el) {
+    el.dataset.unreelKb = '1';
+    el.setAttribute('autocorrect', 'on');
+    el.setAttribute('spellcheck', 'true');
+    el.setAttribute('autocomplete', 'on');
+    el.setAttribute('autocapitalize', 'sentences');
+  }
+  document.addEventListener('focusin', (e) => {
+    const el = e.target;
+    if (el && el.matches && el.matches(TEXT_BOX)) enablePredictive(el);
+  }, true);
 
   // ---- Actions the app can trigger (Home Screen quick actions) ----------------
 
@@ -285,6 +357,9 @@
   const css = [
     // Hide "Get the app" prompts.
     'a[href*="apps.apple.com"], a[href*="itunes.apple.com"] { display: none !important; }',
+    // Explore with the grid hidden: no endless loading spinner. Hiding it also stops
+    // Instagram from fetching more grid posts in the background.
+    '.unreel-explore [role="progressbar"], .unreel-explore [data-visualcompletion="loading-state"], .unreel-explore svg[aria-label^="Loading"] { display: none !important; }',
     // Feel like an app, not a web page: no grey tap flashes, no text-selection/callout menus.
     '* { -webkit-tap-highlight-color: transparent; }',
     'body { -webkit-touch-callout: none; -webkit-user-select: none; user-select: none; }',
@@ -301,6 +376,7 @@
   // Dynamic hiding for content Instagram renders as you scroll.
   const REEL_LINK = 'a[href*="/reel/"], a[href*="/reels/"]';
 
+  // Cheap work that must happen right away (so hidden things never flash on screen).
   function sweep() {
     const path = location.pathname;
 
@@ -311,9 +387,13 @@
       });
     }
 
-    // Explore: keep the search box and results, hide the endless grid of posts.
-    if (cfg.hideExploreGrid && path.startsWith('/explore')) {
-      document.querySelectorAll('a[href^="/p/"], a[href*="/reel/"], a[href*="/reels/"]').forEach((tile) => {
+    // Explore: keep the search box and results, hide the endless grid of posts
+    // (and its loading spinner, which would otherwise spin forever).
+    const onExplore = cfg.hideExploreGrid && path.startsWith('/explore');
+    document.documentElement.classList.toggle('unreel-explore', onExplore);
+    if (onExplore) {
+      document.querySelectorAll('a[href^="/p/"]:not([data-unreel]), a[href*="/reel/"]:not([data-unreel])').forEach((tile) => {
+        tile.dataset.unreel = '1';
         tile.style.display = 'none';
       });
     }
@@ -327,10 +407,18 @@
       });
     }
 
+    document.querySelectorAll(TEXT_BOX).forEach(enablePredictive);
+
+    // Fallback in case a navigation slipped past the history hooks.
+    check(lastPath);
+  }
+
+  // Heavier checks that measure the page. Throttled so they never run every frame
+  // (that was making scrolling and the keyboard animation stutter).
+  function slowSweep() {
     reportTheme();
 
-    // Reel viewer: freeze scrolling and start with sound.
-    const video = viewerVideo();
+    const video = document.querySelector('video') ? viewerVideo() : null;
     if (video) {
       if (reelsRestricted) lockScroll(video);
       startUnmuted(video);
@@ -340,9 +428,15 @@
 
     // Instagram can rewrite <head>; keep zoom locked.
     lockViewport();
+  }
 
-    // Fallback in case a navigation slipped past the history hooks.
-    check(lastPath);
+  let slowTimer = null;
+  function scheduleSlowSweep() {
+    if (slowTimer) return;
+    slowTimer = setTimeout(() => {
+      slowTimer = null;
+      slowSweep();
+    }, 250);
   }
 
   let scheduled = false;
@@ -353,6 +447,7 @@
       scheduled = false;
       sweep();
     });
+    scheduleSlowSweep();
   }
 
   // Tell the app Instagram's background color so the safe areas match it.
@@ -386,6 +481,7 @@
     addStyle();
     lockViewport();
     sweep();
+    slowSweep();
     new MutationObserver(scheduleSweep).observe(document.documentElement, { childList: true, subtree: true });
   }
 
