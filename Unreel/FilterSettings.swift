@@ -9,6 +9,7 @@ final class FilterSettings: ObservableObject {
     @Published var allowDMReels: Bool { didSet { defaults.set(allowDMReels, forKey: "allowDMReels") } }
     @Published var hideExploreGrid: Bool { didSet { defaults.set(hideExploreGrid, forKey: "hideExploreGrid") } }
     @Published var hideAds: Bool { didSet { defaults.set(hideAds, forKey: "hideAds") } }
+    @Published var hideOnline: Bool { didSet { defaults.set(hideOnline, forKey: "hideOnline") } }
     @Published var hasSeenSetup: Bool { didSet { defaults.set(hasSeenSetup, forKey: "hasSeenSetup") } }
 
     init() {
@@ -18,6 +19,7 @@ final class FilterSettings: ObservableObject {
             "allowDMReels": true,
             "hideExploreGrid": true,
             "hideAds": true,
+            "hideOnline": true,
             "hasSeenSetup": false,
         ])
         blockReelsTab = defaults.bool(forKey: "blockReelsTab")
@@ -25,10 +27,11 @@ final class FilterSettings: ObservableObject {
         allowDMReels = defaults.bool(forKey: "allowDMReels")
         hideExploreGrid = defaults.bool(forKey: "hideExploreGrid")
         hideAds = defaults.bool(forKey: "hideAds")
+        hideOnline = defaults.bool(forKey: "hideOnline")
         hasSeenSetup = defaults.bool(forKey: "hasSeenSetup")
     }
 
     var jsConfig: String {
-        "window.__UNREEL__ = {blockReelsTab: \(blockReelsTab), blockFeedReels: \(blockFeedReels), allowDMReels: \(allowDMReels), hideExploreGrid: \(hideExploreGrid), hideAds: \(hideAds)};"
+        "window.__UNREEL__ = {blockReelsTab: \(blockReelsTab), blockFeedReels: \(blockFeedReels), allowDMReels: \(allowDMReels), hideExploreGrid: \(hideExploreGrid), hideAds: \(hideAds), hideOnline: \(hideOnline)};"
     }
 }

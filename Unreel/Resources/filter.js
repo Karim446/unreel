@@ -5,7 +5,7 @@
   window.__unreelLoaded = true;
 
   const cfg = Object.assign(
-    { blockReelsTab: true, blockFeedReels: true, allowDMReels: true, hideExploreGrid: true, hideAds: true },
+    { blockReelsTab: true, blockFeedReels: true, allowDMReels: true, hideExploreGrid: true, hideAds: true, hideOnline: true },
     window.__UNREEL__ || {}
   );
 
@@ -45,16 +45,27 @@
     return '';
   };
   const isReadSignal = (url, body) => READ_SIGNAL.test(String(url || '')) || READ_SIGNAL.test(textOf(body));
+
+  // ---- Hide my online status ("Active now") and typing ------------------------
+  // The page tells Instagram you're active (app in the foreground, "typing…")
+  // over the same channels. Those messages are held back; asking for *other*
+  // people's status (get_presence) still goes through, so you still see them.
+  const PRESENCE_SIGNAL = /foreground|app_?state|set_?presence|update_?presence|presence_?update|ping_?presence|"is_?active"\s*:\s*true|activity_?indicator|is_?typing|typing_?status|\/t_fs|"background"\s*:\s*false/i;
+  const isPresenceSignal = (url, body) => {
+    if (!cfg.hideOnline) return false;
+    const u = String(url || '');
+    if (/get_?presence/i.test(u)) return false;   // reading others' status is fine
+    return PRESENCE_SIGNAL.test(u) || PRESENCE_SIGNAL.test(textOf(body));
+  };
+  const shouldHold = (url, body) => (peeking() && isReadSignal(url, body)) || isPresenceSignal(url, body);
   let heldBack = 0;   // how many read signals were held back (shown in the banner)
 
   const realFetch = window.fetch;
   window.fetch = function (input, init) {
-    if (peeking()) {
-      const url = typeof input === 'string' ? input : input && input.url;
-      if (isReadSignal(url, init && init.body)) {
-        heldBack++;
-        return Promise.resolve(new Response('{"status":"ok"}', { status: 200, headers: { 'content-type': 'application/json' } }));
-      }
+    const url = typeof input === 'string' ? input : input && input.url;
+    if (shouldHold(url, init && init.body)) {
+      heldBack++;
+      return Promise.resolve(new Response('{"status":"ok"}', { status: 200, headers: { 'content-type': 'application/json' } }));
     }
     return realFetch.apply(this, arguments);
   };
@@ -66,7 +77,7 @@
     return realOpen.apply(this, arguments);
   };
   XMLHttpRequest.prototype.send = function (body) {
-    if (peeking() && isReadSignal(this.__unreelUrl, body)) {
+    if (shouldHold(this.__unreelUrl, body)) {
       heldBack++;
       // Pretend it went through, so the page doesn't retry.
       Object.defineProperty(this, 'readyState', { value: 4, configurable: true });
@@ -85,7 +96,11 @@
   if (window.WebSocket) {
     const realWsSend = WebSocket.prototype.send;
     WebSocket.prototype.send = function (data) {
-      if (peeking() && isReadSignal('', data)) { heldBack++; return; }
+      // Never touch the connection handshake itself (MQTT CONNECT packet), or live
+      // chat updates would stop. Only individual messages are held back.
+      const bytes = data instanceof ArrayBuffer ? new Uint8Array(data) : ArrayBuffer.isView(data) ? new Uint8Array(data.buffer, data.byteOffset, data.byteLength) : null;
+      const isHandshake = bytes && bytes.length && (bytes[0] >> 4) === 1;
+      if (!isHandshake && shouldHold('', data)) { heldBack++; return; }
       return realWsSend.apply(this, arguments);
     };
   }
@@ -456,6 +471,11 @@
       try { v = obj[k]; } catch (_) { continue; }
       if (MEDIA_KEYS.test(k) && /^\d{8,25}(_\d+)?$/.test(String(v))) return String(v).split('_')[0];
       if (/^(code|shortcode)$/i.test(k) && typeof v === 'string' && /^[A-Za-z0-9_-]{8,}$/.test(v)) fallback = shortcodeToId(v);
+      // Shared posts in DMs carry a link like instagram.com/reel/CODE/.
+      if (!fallback && typeof v === 'string' && v.length < 400) {
+        const link = v.match(/instagram\.com\/(?:reel|reels|p)\/([A-Za-z0-9_-]{8,})/);
+        if (link) fallback = shortcodeToId(link[1]);
+      }
       // A media object: has a pk/id plus media fields.
       if ((k === 'pk' || k === 'id') && /^\d{8,25}(_\d+)?$/.test(String(v)) &&
           ('media_type' in obj || 'code' in obj || 'like_count' in obj || 'has_liked' in obj)) {
@@ -1166,59 +1186,84 @@
 
   let feedEnded = false;
   let feedEndedPath = null;
+  let hiddenRun = 0;          // hidden posts in a row, in the order Instagram delivered them
+  let shownBottom = 0;        // page position just below the last post that is shown
+
+  function decidePost(post) {
+    const key = postKey(post);
+    if (key && hiddenPosts.has(key)) return true;
+    if (key && keptPosts.has(key)) return false;
+    if (cfg.blockFeedReels && isReelPost(post)) return true;
+    if (cfg.hideAds && isAd(post)) return true;
+    const loaded = post.querySelector('img, video');
+    if (loaded && post.querySelector('header, a[href*="/p/"]')) return false;   // fully loaded, nothing to hide
+    return undefined;   // not loaded yet: decide on a later pass
+  }
 
   function updateFeed() {
     const posts = [...document.querySelectorAll('article')];
+    if (feedEndedPath !== location.pathname) {
+      feedEnded = false; feedEndedPath = location.pathname; hiddenRun = 0; shownBottom = 0;
+      const old = document.getElementById('unreel-caught-up');
+      if (old) old.remove();
+    }
     if (!posts.length) return;
-    if (feedEndedPath !== location.pathname) { feedEnded = false; feedEndedPath = location.pathname; }
 
-    let trailingHidden = 0;
+    let passBottom = 0;
     for (const post of posts) {
-      const key = postKey(post) || post;
       let hide = post.__unreelHide;
       if (hide === undefined) {
-        if (typeof key === 'string' && hiddenPosts.has(key)) hide = true;
-        else if (typeof key === 'string' && keptPosts.has(key)) hide = false;
-        else {
-          const loaded = post.querySelector('img, video');
-          if (cfg.blockFeedReels && isReelPost(post)) hide = true;
-          else if (cfg.hideAds && isAd(post)) hide = true;
-          else if (loaded && post.querySelector('header, a[href*="/p/"]')) hide = false;   // fully loaded, nothing to hide
-          // otherwise: not loaded yet, decide on a later pass
-        }
+        hide = decidePost(post);
         if (hide !== undefined) {
           post.__unreelHide = hide;
-          if (typeof key === 'string') (hide ? hiddenPosts : keptPosts).add(key);
+          const key = postKey(post);
+          const first = key ? !hiddenPosts.has(key) && !keptPosts.has(key) : true;
+          if (key) (hide ? hiddenPosts : keptPosts).add(key);
+          if (first) hiddenRun = hide ? hiddenRun + 1 : 0;
         }
       }
       // A kept post can still turn out to be a Reel once its video loads (once only).
       if (hide === false && cfg.blockFeedReels && post.querySelector('video') && !post.__unreelRechecked) {
         post.__unreelRechecked = true;
         hide = post.__unreelHide = true;
-        if (typeof key === 'string') { keptPosts.delete(key); hiddenPosts.add(key); }
+        const key = postKey(post);
+        if (key) { keptPosts.delete(key); hiddenPosts.add(key); }
       }
+      const slot = feedSlot(post);
       if (hide) {
-        const slot = feedSlot(post);
         if (slot.style.display !== 'none') slot.style.display = 'none';
-        trailingHidden++;
       } else if (hide === false) {
-        trailingHidden = 0;
+        const bottom = slot.getBoundingClientRect().bottom + window.scrollY;
+        if (bottom > passBottom) passBottom = bottom;
       }
     }
+    // Where the last shown post ends (kept current as hidden posts collapse).
+    if (passBottom > 0) shownBottom = passBottom;
+    const placed = document.getElementById('unreel-caught-up');
+    if (placed && placed.style.top !== `${shownBottom}px`) placed.style.top = `${shownBottom}px`;
 
-    // Once the feed is all hidden posts, end it (and keep it ended).
-    if (trailingHidden >= 8) feedEnded = true;
+    // A long run of hidden posts means the rest of the feed is Reels/ads: end it.
+    if (hiddenRun >= 10 && !feedEnded && shownBottom > 0) feedEnded = true;
     document.documentElement.classList.toggle('unreel-feed-end', feedEnded);
-    let card = document.getElementById('unreel-caught-up');
-    if (feedEnded && !card) {
-      card = document.createElement('div');
+    if (feedEnded && !document.getElementById('unreel-caught-up')) {
+      const card = document.createElement('div');
       card.id = 'unreel-caught-up';
       card.innerHTML = '<div class="unreel-check">✓</div><div class="unreel-title">You\u2019re all caught up</div><div class="unreel-sub">Everything else here was Reels or ads.</div>';
-      // Outside Instagram's own list, so it never interferes with how the list updates.
-      const list = feedSlot(posts[posts.length - 1]).parentElement;
-      (list && list.parentElement ? list.parentElement : document.body).appendChild(card);
+      // Placed by position right under the last shown post, outside Instagram's list.
+      card.style.top = `${shownBottom}px`;
+      document.body.appendChild(card);
     }
   }
+
+  // The wall: once the feed has ended, you can't scroll past the card into the
+  // empty space Instagram leaves for the posts we hid.
+  window.addEventListener('scroll', () => {
+    if (!feedEnded || location.pathname !== '/') return;
+    const card = document.getElementById('unreel-caught-up');
+    const end = shownBottom + (card ? card.offsetHeight : 200) + TAB_BAR_HEIGHT;
+    const maxY = Math.max(0, end - window.innerHeight);
+    if (window.scrollY > maxY) window.scrollTo(0, maxY);
+  }, { passive: true });
 
   // ---- Stories: start with sound, skip ads -------------------------------------
   let lastAdSkip = 0;
@@ -1271,7 +1316,11 @@
     try {
       const res = await fetch(`/api/v1/media/${id}/info/`, {
         credentials: 'include',
-        headers: { 'x-ig-app-id': '936619743392459', 'x-requested-with': 'XMLHttpRequest' },
+        headers: {
+          'x-ig-app-id': '936619743392459',
+          'x-requested-with': 'XMLHttpRequest',
+          'x-ig-www-claim': sessionStorage.getItem('www-claim-v2') || '0',
+        },
       });
       const data = await res.json();
       const item = data && data.items && data.items[0];
@@ -1291,44 +1340,71 @@
     if (img.__unreelTriedUrl) return;
     img.__unreelTriedUrl = true;
     let url;
-    try { url = new URL(img.currentSrc || img.src); } catch (_) { return; }
-    if (!url.searchParams.has('stp')) return;
-    url.searchParams.delete('stp');
-    const probe = new Image();
-    probe.onload = () => {
-      if (probe.naturalWidth > (img.naturalWidth || 0) * 1.4) swapImage(img, probe.src);
+    try { url = new URL(currentUrl(img)); } catch (_) { return; }
+    const stp = url.searchParams.get('stp');
+    if (!stp) return;
+    // Two ways to ask for the big version: drop the resize step entirely, or
+    // ask for 1080 px instead of the small size. Try each until one loads bigger.
+    const noResize = new URL(url); noResize.searchParams.delete('stp');
+    const bigger = new URL(url); bigger.searchParams.set('stp', stp.replace(/_[sp]\d+x\d+/g, '_p1080x1080'));
+    const attempts = [noResize.toString(), bigger.toString()].filter((u) => u !== url.toString());
+    const shown = img.tagName === 'IMG' ? (img.naturalWidth || img.getBoundingClientRect().width) : img.getBoundingClientRect().width;
+    const next = () => {
+      const candidate = attempts.shift();
+      if (!candidate) return;
+      const probe = new Image();
+      probe.onload = () => { if (probe.naturalWidth > shown * 1.4) swapImage(img, candidate); else next(); };
+      probe.onerror = next;
+      probe.src = candidate;
     };
-    probe.src = url.toString();
+    next();
   }
 
-  function swapImage(img, url) {
-    img.__unreelSharp = url;
-    img.removeAttribute('srcset');
-    if (img.src !== url) img.src = url;
+
+  const currentUrl = (el) => el.tagName === 'IMG'
+    ? (el.currentSrc || el.src)
+    : ((el.style.backgroundImage.match(/url\(["']?(.*?)["']?\)/) || [])[1] || '');
+
+  function swapImage(el, url) {
+    el.__unreelSharp = url;
+    if (el.tagName === 'IMG') {
+      el.removeAttribute('srcset');
+      if (el.src !== url) el.src = url;
+    } else {
+      el.style.backgroundImage = `url("${url}")`;
+    }
   }
 
   function sharpenPreviews() {
     if (!location.pathname.startsWith('/direct/')) return;
-    for (const img of document.querySelectorAll('img')) {
-      const r = img.getBoundingClientRect();
+    // Previews can be <img> elements or boxes with a background picture.
+    const candidates = [
+      ...document.querySelectorAll('img'),
+      ...[...document.querySelectorAll('[style*="background-image"]')].filter((el) => /url\(/.test(el.style.backgroundImage)),
+    ];
+    for (const el of candidates) {
+      const r = el.getBoundingClientRect();
       if (r.width < 120 || r.height < 120) continue;   // avatars and icons: leave alone
-      if (img.__unreelSharp) {
-        if (img.src !== img.__unreelSharp) swapImage(img, img.__unreelSharp);   // the page reset it
+      if (el.__unreelSharp) {
+        if (currentUrl(el) !== el.__unreelSharp) swapImage(el, el.__unreelSharp);   // the page reset it
         continue;
       }
-      if (img.hasAttribute('srcset') && img.getAttribute('sizes') !== '1080px') img.setAttribute('sizes', '1080px');
-      if (img.__unreelLooking) continue;
-      img.__unreelLooking = true;
+      if (el.tagName === 'IMG' && el.hasAttribute('srcset') && el.getAttribute('sizes') !== '1080px') el.setAttribute('sizes', '1080px');
+      if (el.__unreelLooking) continue;
+      el.__unreelLooking = true;
 
-      const link = img.closest('a[href]') || (img.closest('div') && img.closest('div').querySelector('a[href*="/reel/"], a[href*="/p/"]'));
+      const box = el.closest('a[href]') || el.parentElement;
+      const link = (box && box.matches && box.matches('a[href]')) ? box
+        : (el.closest('[role="button"], div') || el).querySelector('a[href*="/reel/"], a[href*="/p/"]');
       const m = link && (link.getAttribute('href') || '').match(SHORTCODE);
-      const id = (m && shortcodeToId(m[1])) || mediaIdFromReact(img, 12);
-      if (!id) { tryFullSizeUrl(img); continue; }
+      const id = (m && shortcodeToId(m[1])) || mediaIdFromReact(el, 30);
+      if (!id) { tryFullSizeUrl(el); continue; }
       bestImageFor(id).then((url) => {
-        if (url) swapImage(img, url); else tryFullSizeUrl(img);
+        if (url) swapImage(el, url); else tryFullSizeUrl(el);
       });
     }
   }
+
 
   // ---- Peek: long-press in the inbox, banner in the chat ---------------------------
   let pressTimer = null;
@@ -1419,6 +1495,29 @@
     banner.style.top = `${Math.max(56, top) + 8}px`;
   }
 
+  // ---- Chat: only show "Seen" under your own last message --------------------------
+  // The site sometimes puts "Seen 2m ago" under the other person's message, where
+  // it means nothing. The app only shows it under the last message *you* sent.
+  const SEEN_TEXT = /^Seen( by .+)?( \d+\s?[smhdwy]\w* ago| just now| ago)?$/i;
+  function tidySeenLabel() {
+    if (!location.pathname.startsWith('/direct/t/')) return;
+    for (const el of document.querySelectorAll('span, div')) {
+      if (el.childElementCount || !SEEN_TEXT.test(el.textContent.trim())) continue;
+      const r = el.getBoundingClientRect();
+      if (!r.height) continue;
+      // What's just above the label: your bubbles sit on the right, theirs on the left.
+      const y = r.top - 24;
+      const mine = document.elementsFromPoint(window.innerWidth * 0.88, y)
+        .some((x) => x !== el && x.textContent.trim() && x.getBoundingClientRect().right > window.innerWidth * 0.8 &&
+                     x.getBoundingClientRect().width < window.innerWidth * 0.9);
+      const theirs = document.elementsFromPoint(window.innerWidth * 0.25, y)
+        .some((x) => x.textContent.trim() && x.getBoundingClientRect().left < window.innerWidth * 0.4 &&
+                     x.getBoundingClientRect().width < window.innerWidth * 0.9);
+      const hide = theirs && !mine;
+      el.style.visibility = hide ? 'hidden' : '';
+    }
+  }
+
   // ---- Actions the app can trigger (Home Screen quick actions) ----------------
 
   window.__unreel = {
@@ -1461,7 +1560,7 @@
     '[data-unreel-status]::after { content: attr(data-unreel-status); font-size: 14px; opacity: 0.65; }',
     // End of the feed: stop the endless loading once everything left is hidden.
     '.unreel-feed-end [role="progressbar"], .unreel-feed-end [data-visualcompletion="loading-state"], .unreel-feed-end svg[aria-label^="Loading"] { display: none !important; }',
-    '#unreel-caught-up { text-align: center; padding: 40px 24px 60px; color: #f5f5f5; }',
+    '#unreel-caught-up { position: absolute; left: 0; right: 0; text-align: center; padding: 40px 24px 60px; color: #f5f5f5; }',
     '@media (prefers-color-scheme: light) { #unreel-caught-up { color: #000; } }',
     '#unreel-caught-up .unreel-check { width: 64px; height: 64px; margin: 0 auto 14px; border-radius: 50%; border: 2px solid currentColor; display: flex; align-items: center; justify-content: center; font-size: 30px; opacity: 0.9; }',
     '#unreel-caught-up .unreel-title { font-size: 20px; font-weight: 600; }',
@@ -1533,6 +1632,7 @@
     updateHeader();
     updateInboxStatus();
     updatePeek();
+    tidySeenLabel();
 
 
     // Fallback in case a navigation slipped past the history hooks.
