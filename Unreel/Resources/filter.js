@@ -60,8 +60,20 @@
   const shouldHold = (url, body) => (peeking() && isReadSignal(url, body)) || isPresenceSignal(url, body);
   let heldBack = 0;   // how many read signals were held back (shown in the banner)
 
+  // Instagram tags its web responses with an "x-ig-www-claim" value, and later
+  // requests must send it back. We capture it here and stash it so the app can
+  // read it (the app can't get it on its own).
+  function rememberClaim(value) {
+    if (value && value !== '0') {
+      try { sessionStorage.setItem('www-claim-v2', value); } catch (_) {}
+      try { localStorage.setItem('unreel-www-claim', value); } catch (_) {}
+    }
+  }
+
   const realFetch = window.fetch;
   window.fetch = function (input, init) {
+    const out = realFetch.apply(this, arguments);
+    if (out && out.then) out.then((res) => { try { rememberClaim(res.headers.get('x-ig-set-www-claim')); } catch (_) {} }).catch(() => {});
     const url = typeof input === 'string' ? input : input && input.url;
     if (shouldHold(url, init && init.body)) {
       heldBack++;
@@ -76,7 +88,11 @@
     this.__unreelUrl = url;
     return realOpen.apply(this, arguments);
   };
+  const realGetHeader = XMLHttpRequest.prototype.getResponseHeader;
   XMLHttpRequest.prototype.send = function (body) {
+    this.addEventListener('load', function () {
+      try { rememberClaim(realGetHeader.call(this, 'x-ig-set-www-claim')); } catch (_) {}
+    });
     if (shouldHold(this.__unreelUrl, body)) {
       heldBack++;
       // Pretend it went through, so the page doesn't retry.

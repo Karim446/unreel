@@ -30,6 +30,9 @@ final class MessageNotifier: NSObject, ObservableObject, UNUserNotificationCente
 
     private let defaults = UserDefaults.standard
     private let lastSeenKey = "notifier.lastItemTimestamp"
+    private var wwwClaim: String { defaults.string(forKey: "notifier.wwwClaim") ?? "0" }
+
+    func updateClaim(_ value: String) { defaults.set(value, forKey: "notifier.wwwClaim") }
 
     // MARK: Turning it on and off
 
@@ -122,7 +125,10 @@ final class MessageNotifier: NSObject, ObservableObject, UNUserNotificationCente
 
     private func runBackgroundTask(_ task: BGTask) async {
         scheduleBackgroundTasks()   // always re-schedule the next one
-        let work = Task { await checkInbox() }
+        let work = Task {
+            _ = await WebViewStore.current?.readClaim()
+            await checkInbox()
+        }
         task.expirationHandler = { work.cancel() }
         await work.value
         task.setTaskCompleted(success: true)
@@ -275,11 +281,11 @@ final class MessageNotifier: NSObject, ObservableObject, UNUserNotificationCente
     /// Instagram's own app uses, and remember whichever works.
     private static var workingEndpoint: Int?   // index into `endpoints`
 
+    // The website address (first) answers once we send the www-claim; the app
+    // address is a fallback.
     private static let endpoints: [(base: String, userAgent: String, appId: String)] = [
         ("https://www.instagram.com", WebViewStore.safariUA, "936619743392459"),
-        ("https://i.instagram.com",
-         "Instagram 360.0.0.30.109 (iPhone15,2; iOS 18_6; en_US; en-US; scale=3.00; 1179x2556; 672535977)",
-         "124024574287414"),
+        ("https://i.instagram.com", WebViewStore.safariUA, "936619743392459"),
     ]
 
     static func instagramGET(_ path: String, cookie: String, csrf: String) async -> (Data, URLResponse)? {
@@ -295,6 +301,10 @@ final class MessageNotifier: NSObject, ObservableObject, UNUserNotificationCente
             request.setValue("XMLHttpRequest", forHTTPHeaderField: "X-Requested-With")
             request.setValue(e.userAgent, forHTTPHeaderField: "User-Agent")
             request.setValue("https://www.instagram.com/direct/inbox/", forHTTPHeaderField: "Referer")
+            request.setValue("https://www.instagram.com", forHTTPHeaderField: "Origin")
+            request.setValue(wwwClaim, forHTTPHeaderField: "X-IG-WWW-Claim")
+            request.setValue("1", forHTTPHeaderField: "X-IG-Capabilities")
+            request.setValue("z", forHTTPHeaderField: "X-IG-Connection-Type")
             request.httpShouldHandleCookies = false
             guard let result = try? await URLSession.shared.data(for: request) else { continue }
             last = result

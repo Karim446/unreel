@@ -89,6 +89,7 @@ final class WebViewStore: NSObject, ObservableObject, WKNavigationDelegate, WKUI
         WebViewStore.current = self
         Task { @MainActor in
             try? await Task.sleep(nanoseconds: 3_000_000_000)
+            _ = await self.readClaim()
             await self.pushPageData()
         }
 
@@ -151,6 +152,15 @@ final class WebViewStore: NSObject, ObservableObject, WKNavigationDelegate, WKUI
             js += "window.__unreel && window.__unreel.setPresence(\(text));"
         }
         if !js.isEmpty { _ = try? await webView.evaluateJavaScript(js) }
+    }
+
+    /// Reads Instagram's www-claim value the page captured, for background checks.
+    func readClaim() async -> String? {
+        let js = "sessionStorage.getItem('www-claim-v2') || localStorage.getItem('unreel-www-claim') || ''"
+        let result = try? await webView.evaluateJavaScript(js)
+        let claim = result as? String
+        if let claim, !claim.isEmpty { MessageNotifier.shared.updateClaim(claim) }
+        return claim
     }
 
     func openThread(_ id: String) {
