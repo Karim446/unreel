@@ -4,9 +4,12 @@ struct SettingsView: View {
     @EnvironmentObject private var settings: FilterSettings
     @Environment(\.dismiss) private var dismiss
     var openEditProfile: () -> Void
+    var resetCache: () -> Void
+    @State private var confirmReset = false
 
-    init(openEditProfile: @escaping () -> Void = {}) {
+    init(openEditProfile: @escaping () -> Void = {}, resetCache: @escaping () -> Void = {}) {
         self.openEditProfile = openEditProfile
+        self.resetCache = resetCache
     }
 
     var body: some View {
@@ -43,6 +46,16 @@ struct SettingsView: View {
                     Text("Peek: long-press a chat in your inbox to read it without sending \"Seen\". Tap \"Mark as read\" in the chat when you're ready.")
                 }
                 Section {
+                    Toggle("Message notifications", isOn: $settings.notifications)
+                } footer: {
+                    Text("Unreel checks your inbox every 15 seconds while it's in the background and notifies you of new messages. Tapping one opens that chat, and reading a chat here clears its notifications. If you swipe Unreel away in the app switcher, checking stops until you open it again.")
+                }
+                Section {
+                    Button("Reset Cache", role: .destructive) { confirmReset = true }
+                } footer: {
+                    Text("Fixes most display problems: clears saved pages, images and layout data and reloads. You stay logged in.")
+                }
+                Section {
                     NavigationLink("Set up Instagram redirect") { SetupGuideView() }
                 } footer: {
                     Text("To get back here, shake your phone or long-press the app icon and choose Filters.")
@@ -52,6 +65,14 @@ struct SettingsView: View {
                 } footer: {
                     Text("Matches the run number on GitHub Actions, so you can confirm which version is installed.")
                 }
+            }
+            .confirmationDialog("Reset cache?", isPresented: $confirmReset, titleVisibility: .visible) {
+                Button("Reset Cache", role: .destructive) {
+                    dismiss()
+                    resetCache()
+                }
+            } message: {
+                Text("Unreel will reload. You'll stay logged in.")
             }
             .navigationTitle("Filters")
             .navigationBarTitleDisplayMode(.inline)

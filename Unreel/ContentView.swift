@@ -26,7 +26,11 @@ struct ContentView: View {
             didLoad = true
             QuickActions.install()
             store.apply(settings, reloadIfChanged: false)
-            if let url = pendingURL {
+            MessageNotifier.shared.setEnabled(settings.notifications)
+            if let thread = router.pendingThread {
+                router.pendingThread = nil
+                store.openThread(thread)
+            } else if let url = pendingURL {
                 store.open(url)
             } else if let action = router.pendingAction {
                 router.pendingAction = nil
@@ -35,6 +39,14 @@ struct ContentView: View {
                 store.loadLastLocation()
             }
             if !settings.hasSeenSetup { showSetup = true }
+        }
+        .onReceive(router.$pendingThread) { thread in
+            guard didLoad, let thread else { return }
+            router.pendingThread = nil
+            store.openThread(thread)
+        }
+        .onChange(of: settings.notifications) { _, on in
+            MessageNotifier.shared.setEnabled(on)
         }
         .onReceive(router.$pendingAction) { action in
             guard didLoad, let action else { return }
@@ -49,6 +61,8 @@ struct ContentView: View {
         }) {
             SettingsView(openEditProfile: {
                 store.webView.load(URLRequest(url: URL(string: "accounts/edit/", relativeTo: WebViewStore.home)!))
+            }, resetCache: {
+                store.resetCache()
             })
         }
         .sheet(isPresented: $showSetup, onDismiss: { settings.hasSeenSetup = true }) {

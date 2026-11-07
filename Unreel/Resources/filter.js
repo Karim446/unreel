@@ -158,13 +158,16 @@
   // Tell the app which page we're on (it closes the keyboard when you leave a chat).
   const reportRoute = () => window.webkit?.messageHandlers?.route?.postMessage(location.pathname);
 
-  let spaNavigated = false;   // true once Instagram has navigated in-page (so history.back() is cheap)
+  let spaNavigated = false;
+  let pathChangedAt = Date.now();   // true once Instagram has navigated in-page (so history.back() is cheap)
 
   function check(from) {
     const path = location.pathname;
     if (path === lastPath) return;
     lastPath = path;
+    pathChangedAt = Date.now();
     spaNavigated = true;
+    setTimeout(() => refreshUnread(true), 1500);
     reportRoute();
     const target = decide(path, from);
     if (target && target !== path) location.replace(target);
@@ -686,7 +689,7 @@
   // icons, badges and selected states keep updating and we mirror them live.
   // Because the same bar stays on screen between tabs, switching never flickers.
 
-  const NAV_KEY = 'unreel-nav-v2';
+  const NAV_KEY = 'unreel-nav-v3';   // v3: drops icons saved mid page-change by older versions
   let savedNav = null;
   let savedJSON = '';
   try {
@@ -725,11 +728,22 @@
     !(cfg.blockReelsTab && a.getAttribute('href').startsWith('/reels')) && getComputedStyle(a).display !== 'none');
 
   // Remember each tab's icon in its selected and unselected state.
+  let captureRetry = null;
   function captureSiteNav(nav) {
     const path = location.pathname;
     // Opening DMs changes the URL a moment before the site's bar disappears;
     // copying it then would save the wrong states, so only copy outside DMs.
     if (path.startsWith('/direct')) return;
+    // Right after a page change, the site's bar still shows the *previous* tab as
+    // selected for a moment. Copying it then saved a filled Home icon as Home's
+    // "unselected" look (so Home and Messages could both look filled). Only copy
+    // once the page has been settled for a bit.
+    const settledIn = 900 - (Date.now() - pathChangedAt);
+    if (settledIn > 0) {
+      clearTimeout(captureRetry);
+      captureRetry = setTimeout(() => updateTabBar(true), settledIn + 50);   // try again once settled
+      return;
+    }
     const old = (savedNav && savedNav.items) || [];
     const items = siteNavLinks(nav).map((a) => {
       const href = a.getAttribute('href');
@@ -782,6 +796,21 @@
   let pendingHref = null;
   let pendingUntil = 0;
 
+  // A saved copy of the Messages icon carries whatever unread count it had when it
+  // was saved, which goes stale. Where we can't mirror the live count, show none.
+  function stripBadge(html) {
+    if (!html) return html;
+    const holder = document.createElement('div');
+    holder.innerHTML = html;
+    for (const el of holder.querySelectorAll('*')) {
+      if (el.isConnected !== false && /^\s*\d+\+?\s*$/.test(el.textContent) && !el.querySelector('svg')) {
+        const box = el.parentElement && el.parentElement !== holder && !el.parentElement.querySelector('svg') ? el.parentElement : el;
+        box.remove();
+      }
+    }
+    return holder.innerHTML;
+  }
+
   function iconsToShow(nav) {
     const path = location.pathname;
     if (pendingHref && (Date.now() > pendingUntil || isSelected(pendingHref, path))) pendingHref = null;
@@ -790,8 +819,10 @@
       const sel = target ? item.href === target : isSelected(item.href, path);
       const live = !target && nav && [...nav.querySelectorAll('a[href]')].find((a) => a.getAttribute('href') === item.href);
       let html;
-      if (live && !(item.href.startsWith('/direct') && sel)) html = live.innerHTML;   // exact and current
-      else if (item.href.startsWith('/direct')) html = sel ? selectedMessagesIcon(item.off || item.on) : (item.off || item.on);
+      if (live && !(item.href.startsWith('/direct') && sel)) {
+        html = item.href.startsWith('/direct') ? stripBadge(live.innerHTML) : live.innerHTML;   // exact and current
+      }
+      else if (item.href.startsWith('/direct')) html = stripBadge(sel ? selectedMessagesIcon(item.off || item.on) : (item.off || item.on));
       else html = sel ? (item.on || item.off) : (item.off || item.on);
       return { href: item.href, html: html || '' };
     });
@@ -818,7 +849,15 @@
     e.preventDefault();
     e.stopPropagation();
     const href = tab.getAttribute('href');
-    if (isSelected(href, location.pathname)) return;
+    if (isSelected(href, location.pathname)) {
+      // Already here: scroll back to the top, like the app.
+      const sc = (location.pathname === '/' && feedScroller) || document.scrollingElement || document.documentElement;
+      sc.scrollTo({ top: 0, behavior: 'smooth' });
+      for (const el of document.querySelectorAll('main, [role="main"]')) {
+        if (el.scrollTop > 0) el.scrollTo({ top: 0, behavior: 'smooth' });
+      }
+      return;
+    }
     pendingHref = href;
     pendingUntil = Date.now() + 1500;
     lastSig = '';
@@ -850,7 +889,10 @@
       const h = d.getBoundingClientRect().height;
       return h > 0 && h < window.innerHeight - 10;   // a sheet, not a full page
     });
-    if (typing || sheetOpen) {
+    // A sheet (create menu, note, comments) slides over our bar instead of the bar
+    // being swapped for Instagram's own (which changed the spacing).
+    document.documentElement.classList.toggle('unreel-under-sheet', sheetOpen);
+    if (typing) {
       document.documentElement.classList.remove('unreel-tabbar-on', 'unreel-has-tabbar');
       if (bar) bar.remove();
       lastSig = '';
@@ -886,7 +928,7 @@
     }
 
     const icons = iconsToShow(nav);
-    const sig = currentBarBg() + '|' + icons.map((i) => i.href + i.html).join('|');
+    const sig = currentBarBg() + '|' + unreadCount + '|' + icons.map((i) => i.href + i.html).join('|');
     if (sig === lastSig) return;
     lastSig = sig;
 
@@ -894,12 +936,17 @@
     const dark = isDarkColor(bg);
     bar.style.height = `${TAB_BAR_HEIGHT}px`;
     bar.style.background = bg;
+    bar.style.setProperty('--unreel-bar-bg', bg);
     bar.style.borderTop = sameMode() && savedNav.borderTop ? savedNav.borderTop
       : `0.5px solid ${dark ? 'rgba(255,255,255,0.12)' : 'rgba(0,0,0,0.12)'}`;
     bar.style.color = dark ? '#f5f5f5' : '#000';
     bar.dataset.scheme = dark ? 'dark' : 'light';
     document.documentElement.style.setProperty('--unreel-tabbar-h', `${TAB_BAR_HEIGHT}px`);
-    bar.innerHTML = icons.map((i) => `<a class="unreel-tab" href="${i.href}">${i.html}</a>`).join('');
+    bar.innerHTML = icons.map((i) => {
+      const badge = i.href.startsWith('/direct') && unreadCount > 0
+        ? `<span class="unreel-badge">${unreadCount > 99 ? '99+' : unreadCount}</span>` : '';
+      return `<a class="unreel-tab" href="${i.href}"><span class="unreel-tab-icon">${i.html}${badge}</span></a>`;
+    }).join('');
   }
 
   // ---- Search your Story viewer list --------------------------------------
@@ -1184,10 +1231,6 @@
     return m ? m[1] : null;
   };
 
-  let feedEnded = false;
-  let feedEndedPath = null;
-  let hiddenRun = 0;          // hidden posts in a row, in the order Instagram delivered them
-  let shownBottom = 0;        // page position just below the last post that is shown
 
   function decidePost(post) {
     const key = postKey(post);
@@ -1202,14 +1245,7 @@
 
   function updateFeed() {
     const posts = [...document.querySelectorAll('article')];
-    if (feedEndedPath !== location.pathname) {
-      feedEnded = false; feedEndedPath = location.pathname; hiddenRun = 0; shownBottom = 0;
-      const old = document.getElementById('unreel-caught-up');
-      if (old) old.remove();
-    }
     if (!posts.length) return;
-
-    let passBottom = 0;
     for (const post of posts) {
       let hide = post.__unreelHide;
       if (hide === undefined) {
@@ -1217,9 +1253,7 @@
         if (hide !== undefined) {
           post.__unreelHide = hide;
           const key = postKey(post);
-          const first = key ? !hiddenPosts.has(key) && !keptPosts.has(key) : true;
           if (key) (hide ? hiddenPosts : keptPosts).add(key);
-          if (first) hiddenRun = hide ? hiddenRun + 1 : 0;
         }
       }
       // A kept post can still turn out to be a Reel once its video loads (once only).
@@ -1229,41 +1263,122 @@
         const key = postKey(post);
         if (key) { keptPosts.delete(key); hiddenPosts.add(key); }
       }
-      const slot = feedSlot(post);
       if (hide) {
+        const slot = feedSlot(post);
         if (slot.style.display !== 'none') slot.style.display = 'none';
-      } else if (hide === false) {
-        const bottom = slot.getBoundingClientRect().bottom + window.scrollY;
-        if (bottom > passBottom) passBottom = bottom;
       }
-    }
-    // Where the last shown post ends (kept current as hidden posts collapse).
-    if (passBottom > 0) shownBottom = passBottom;
-    const placed = document.getElementById('unreel-caught-up');
-    if (placed && placed.style.top !== `${shownBottom}px`) placed.style.top = `${shownBottom}px`;
-
-    // A long run of hidden posts means the rest of the feed is Reels/ads: end it.
-    if (hiddenRun >= 10 && !feedEnded && shownBottom > 0) feedEnded = true;
-    document.documentElement.classList.toggle('unreel-feed-end', feedEnded);
-    if (feedEnded && !document.getElementById('unreel-caught-up')) {
-      const card = document.createElement('div');
-      card.id = 'unreel-caught-up';
-      card.innerHTML = '<div class="unreel-check">✓</div><div class="unreel-title">You\u2019re all caught up</div><div class="unreel-sub">Everything else here was Reels or ads.</div>';
-      // Placed by position right under the last shown post, outside Instagram's list.
-      card.style.top = `${shownBottom}px`;
-      document.body.appendChild(card);
     }
   }
 
-  // The wall: once the feed has ended, you can't scroll past the card into the
-  // empty space Instagram leaves for the posts we hid.
-  window.addEventListener('scroll', () => {
-    if (!feedEnded || location.pathname !== '/') return;
-    const card = document.getElementById('unreel-caught-up');
-    const end = shownBottom + (card ? card.offsetHeight : 200) + TAB_BAR_HEIGHT;
-    const maxY = Math.max(0, end - window.innerHeight);
-    if (window.scrollY > maxY) window.scrollTo(0, maxY);
-  }, { passive: true });
+  // ---- The "wall of doom": empty scrolling on the home feed --------------------
+  // Earlier versions tried to predict where the feed ends (counting hidden posts,
+  // measuring the last post). That kept failing because Instagram reserves space
+  // for posts in ways we can't see, and it scrolls a container we weren't
+  // watching. So now we simply look at the screen:
+  //
+  //  * Every scroll on the page is caught (in the capture phase, so it works no
+  //    matter which element is the one scrolling).
+  //  * We sample a few points in the middle of the screen. If none of them land
+  //    on real content (a picture, video, icon or text), the screen is empty.
+  //  * Empty space is skipped instantly: we jump ahead to the next real content.
+  //  * If we skip several screens' worth and find nothing, that's the end: we jump
+  //    back to the last real content, show "You're all caught up", and stop the
+  //    feed from loading or scrolling further.
+  let feedScroller = null;          // whatever element actually scrolls the feed
+  let lastContentTop = 0;           // scroll position where real content was last on screen
+  let wallTop = null;               // scroll position of the wall once reached (null = not yet)
+  let skipping = false;
+
+  const scrollerOf = (target) =>
+    (!target || target === document || target === document.documentElement || target === document.body)
+      ? (document.scrollingElement || document.documentElement) : target;
+
+  function hasContentAt(x, y) {
+    for (const el of document.elementsFromPoint(x, y).slice(0, 8)) {
+      if (el.closest('#unreel-tabbar, #unreel-caught-up, [data-unreel-header]')) continue;
+      if (el === document.documentElement || el === document.body) return false;
+      if (/^(IMG|VIDEO|SVG|CANVAS|PICTURE)$/i.test(el.tagName)) return true;
+      for (const n of el.childNodes) if (n.nodeType === 3 && n.textContent.trim()) return true;
+    }
+    return false;
+  }
+
+  function screenHasContent() {
+    const x = window.innerWidth / 2;
+    return [0.25, 0.4, 0.55, 0.7].some((f) => hasContentAt(x, window.innerHeight * f) ||
+      hasContentAt(window.innerWidth * 0.2, window.innerHeight * f));
+  }
+
+  function showCaughtUp(show) {
+    let card = document.getElementById('unreel-caught-up');
+    document.documentElement.classList.toggle('unreel-feed-end', wallTop !== null);
+    if (!show) { if (card) card.classList.remove('show'); return; }
+    if (!card) {
+      card = document.createElement('div');
+      card.id = 'unreel-caught-up';
+      card.innerHTML = '<div class="unreel-check">✓</div><div class="unreel-title">You\u2019re all caught up</div><div class="unreel-sub">Everything else here was Reels or ads.</div>';
+      document.body.appendChild(card);
+    }
+    card.classList.add('show');
+  }
+
+  function checkForWall() {
+    if (location.pathname !== '/' || skipping) return;
+    const sc = feedScroller || scrollerOf(null);
+    const top = sc.scrollTop;
+
+    if (wallTop !== null) {
+      // Past the wall: hold the position. Near it: show the card.
+      if (top > wallTop) sc.scrollTop = wallTop;
+      showCaughtUp(top >= wallTop - 40);
+      return;
+    }
+    if (screenHasContent()) { lastContentTop = top; return; }
+
+    // Empty screen: skip ahead to the next real content.
+    skipping = true;
+    const step = window.innerHeight * 0.8;
+    let jumped = 0;
+    const hop = () => {
+      const max = sc.scrollHeight - sc.clientHeight;
+      if (screenHasContent()) { skipping = false; lastContentTop = sc.scrollTop; return; }
+      if (jumped > window.innerHeight * 6 || sc.scrollTop >= max - 2) {
+        // Nothing for several screens (or nothing left): that's the end. Walk
+        // forward from the last place we saw content to find where it really stops.
+        let lastGood = lastContentTop;
+        for (let p = lastContentTop; p <= lastContentTop + window.innerHeight * 8; p += window.innerHeight * 0.15) {
+          sc.scrollTop = p;
+          if (screenHasContent()) lastGood = p; else if (p - lastGood > window.innerHeight * 0.6) break;
+        }
+        wallTop = Math.max(0, lastGood + window.innerHeight * 0.05);   // last posts stay on screen above the card
+        sc.scrollTop = wallTop;
+        skipping = false;
+        showCaughtUp(true);
+        return;
+      }
+      sc.scrollTop = Math.min(max, sc.scrollTop + step);
+      jumped += step;
+      requestAnimationFrame(hop);
+    };
+    requestAnimationFrame(hop);
+  }
+
+  let wallTimer = null;
+  document.addEventListener('scroll', (e) => {
+    if (location.pathname !== '/') return;
+    feedScroller = scrollerOf(e.target);
+    if (wallTimer) return;
+    wallTimer = setTimeout(() => { wallTimer = null; checkForWall(); }, 80);
+  }, { capture: true, passive: true });
+
+  // Leaving the feed resets the wall, so new posts can show next time.
+  let wallPath = location.pathname;
+  function resetWallOnNavigate() {
+    if (location.pathname === wallPath) return;
+    wallPath = location.pathname;
+    wallTop = null; lastContentTop = 0; skipping = false;
+    showCaughtUp(false);
+  }
 
   // ---- Stories: start with sound, skip ads -------------------------------------
   let lastAdSkip = 0;
@@ -1518,6 +1633,40 @@
     }
   }
 
+  // ---- Unread count on the Messages tab -----------------------------------------
+  // The site's own badge often lags. We ask Instagram for the unread count directly
+  // (the same lightweight request the app uses) every 20 seconds and whenever you
+  // change pages, and draw the badge ourselves.
+  let unreadCount = 0;
+  let lastBadgeFetch = 0;
+  async function refreshUnread(force) {
+    if (!force && Date.now() - lastBadgeFetch < 20000) return;
+    lastBadgeFetch = Date.now();
+    const headers = { 'x-ig-app-id': '936619743392459', 'x-requested-with': 'XMLHttpRequest' };
+    let count = null;
+    try {
+      const res = await realFetch('/api/v1/direct_v2/get_badge_count/?no_raven=1', { credentials: 'include', headers });
+      const data = await res.json();
+      if (typeof data.badge_count === 'number') count = data.badge_count;
+    } catch (_) {}
+    if (count === null) {
+      try {
+        const res = await realFetch('/api/v1/direct_v2/inbox/?limit=20&persistentBadging=true', { credentials: 'include', headers });
+        const data = await res.json();
+        const inbox = data && data.inbox;
+        if (inbox && typeof inbox.unseen_count === 'number') count = inbox.unseen_count;
+        else if (inbox && inbox.threads) count = inbox.threads.filter((t) => t.read_state === 1).length;
+      } catch (_) {}
+    }
+    if (count !== null && count !== unreadCount) {
+      unreadCount = count;
+      lastSig = '';
+      updateTabBar();
+      window.webkit?.messageHandlers?.unread?.postMessage(count);   // app icon badge
+    }
+  }
+  setInterval(() => refreshUnread(false), 5000);
+
   // ---- Actions the app can trigger (Home Screen quick actions) ----------------
 
   window.__unreel = {
@@ -1542,8 +1691,11 @@
     '.unreel-explore [role="progressbar"], .unreel-explore [data-visualcompletion="loading-state"], .unreel-explore svg[aria-label^="Loading"] { display: none !important; }',
     // Our tab bar: Instagram's icons in equal-width columns, pinned to the bottom.
     '#unreel-tabbar { position: fixed; left: 0; right: 0; bottom: 0; z-index: 2147483000; display: flex; align-items: stretch; }',
+    '.unreel-under-sheet #unreel-tabbar { z-index: 0; }',
     '.unreel-tab { flex: 1 1 0; display: flex; align-items: center; justify-content: center; color: inherit; text-decoration: none; }',
     '.unreel-tab > * { pointer-events: none; }',
+    '.unreel-tab-icon { position: relative; display: inline-flex; align-items: center; justify-content: center; }',
+    '.unreel-badge { position: absolute; top: -6px; right: -9px; min-width: 18px; height: 18px; padding: 0 5px; box-sizing: border-box; border-radius: 9px; background: #ff3040; color: #fff; font-size: 11px; font-weight: 700; line-height: 18px; text-align: center; border: 2px solid var(--unreel-bar-bg, #000); }',
     '.unreel-tab svg { width: 22px !important; height: 22px !important; }',
     '.unreel-tab img { width: 24px !important; height: 24px !important; border-radius: 50%; }',
     // Instagram's own bar stays laid out (so it keeps updating) but invisible.
@@ -1560,7 +1712,8 @@
     '[data-unreel-status]::after { content: attr(data-unreel-status); font-size: 14px; opacity: 0.65; }',
     // End of the feed: stop the endless loading once everything left is hidden.
     '.unreel-feed-end [role="progressbar"], .unreel-feed-end [data-visualcompletion="loading-state"], .unreel-feed-end svg[aria-label^="Loading"] { display: none !important; }',
-    '#unreel-caught-up { position: absolute; left: 0; right: 0; text-align: center; padding: 40px 24px 60px; color: #f5f5f5; }',
+    '#unreel-caught-up { position: fixed; left: 0; right: 0; bottom: 60px; text-align: center; padding: 24px; color: #f5f5f5; opacity: 0; transform: translateY(12px); transition: opacity .25s, transform .25s; pointer-events: none; z-index: 5; }',
+    '#unreel-caught-up.show { opacity: 1; transform: none; }',
     '@media (prefers-color-scheme: light) { #unreel-caught-up { color: #000; } }',
     '#unreel-caught-up .unreel-check { width: 64px; height: 64px; margin: 0 auto 14px; border-radius: 50%; border: 2px solid currentColor; display: flex; align-items: center; justify-content: center; font-size: 30px; opacity: 0.9; }',
     '#unreel-caught-up .unreel-title { font-size: 20px; font-weight: 600; }',
@@ -1603,6 +1756,7 @@
   function sweep() {
     const path = location.pathname;
 
+    resetWallOnNavigate();
     if (path === '/') updateFeed();
 
     // Explore: keep the search box and results, hide the endless grid of posts
@@ -1719,6 +1873,7 @@
   function start() {
     paintBackground(window.__UNREEL_BG__);
     reportRoute();
+    refreshUnread(true);
     addStyle();
     lockViewport();
     sweep();

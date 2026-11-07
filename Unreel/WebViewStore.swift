@@ -49,6 +49,7 @@ final class WebViewStore: NSObject, ObservableObject, WKNavigationDelegate, WKUI
         webView.configuration.userContentController.add(self, name: "theme")
         webView.configuration.userContentController.add(self, name: "haptic")
         webView.configuration.userContentController.add(self, name: "route")
+        webView.configuration.userContentController.add(self, name: "unread")
         webView.hideKeyboardAccessoryBar()
         webView.customUserAgent = Self.safariUA
         // WebKit's built-in back swipe shows a snapshot of the previous page, and for
@@ -119,6 +120,31 @@ final class WebViewStore: NSObject, ObservableObject, WKNavigationDelegate, WKUI
         let skip = ["/reel", "/reels", "/accounts/", "/challenge", "/stories/"]
         guard !skip.contains(where: { path.hasPrefix($0) }) else { return }
         UserDefaults.standard.set(url, forKey: resumeKey)
+    }
+
+    // MARK: Notifications and maintenance
+
+    func openThread(_ id: String) {
+        webView.load(URLRequest(url: URL(string: "direct/t/\(id)/", relativeTo: Self.home)!))
+    }
+
+    /// Clears cached pages, images and saved page data (not your login), then reloads.
+    func resetCache() {
+        let types: Set<String> = [
+            WKWebsiteDataTypeDiskCache, WKWebsiteDataTypeMemoryCache,
+            WKWebsiteDataTypeOfflineWebApplicationCache, WKWebsiteDataTypeFetchCache,
+            WKWebsiteDataTypeLocalStorage, WKWebsiteDataTypeSessionStorage,
+            WKWebsiteDataTypeIndexedDBDatabases, WKWebsiteDataTypeServiceWorkerRegistrations,
+        ]
+        WKWebsiteDataStore.default().removeData(ofTypes: types, modifiedSince: .distantPast) { [weak self] in
+            Task { @MainActor in
+                for key in ["pageColorCSS-dark", "pageColorCSS-light", "resumeURL"] {
+                    UserDefaults.standard.removeObject(forKey: key)
+                }
+                self?.appliedConfig = nil
+                self?.loadHome()
+            }
+        }
     }
 
     // MARK: Quick actions
@@ -209,10 +235,18 @@ final class WebViewStore: NSObject, ObservableObject, WKNavigationDelegate, WKUI
         if message.name == "haptic", let style = message.body as? String {
             return Haptics.play(style)
         }
+        if message.name == "unread", let count = message.body as? Int {
+            MessageNotifier.shared.setAppBadge(count)
+            return
+        }
         if message.name == "route", let newPath = message.body as? String {
             if newPath != path {
                 let wasInChat = inChat
                 path = newPath
+                // Reading a chat here clears its notifications.
+                if let thread = newPath.split(separator: "/").dropFirst(2).first, newPath.hasPrefix("/direct/t/") {
+                    MessageNotifier.shared.clearNotifications(forThread: String(thread))
+                }
                 webView.scrollView.isScrollEnabled = !inChat
                 webView.scrollView.refreshControl = inChat ? nil : refreshControl
                 if wasInChat && !inChat {

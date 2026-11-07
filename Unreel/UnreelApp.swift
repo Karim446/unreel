@@ -8,6 +8,7 @@ struct UnreelApp: App {
 
     init() {
         KeyboardTracker.shared.start()   // before any web view exists, so it runs first
+        MessageNotifier.shared.configure()
     }
 
     var body: some Scene {
@@ -25,6 +26,8 @@ final class AppRouter: ObservableObject {
     @Published var showSettings = false
     /// A quick action waiting to be carried out by ContentView.
     @Published var pendingAction: QuickAction?
+    /// A chat to open (from tapping one of Unreel's notifications).
+    @Published var pendingThread: String?
 }
 
 enum QuickAction: String {

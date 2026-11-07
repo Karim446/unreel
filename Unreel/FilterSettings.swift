@@ -10,6 +10,7 @@ final class FilterSettings: ObservableObject {
     @Published var hideExploreGrid: Bool { didSet { defaults.set(hideExploreGrid, forKey: "hideExploreGrid") } }
     @Published var hideAds: Bool { didSet { defaults.set(hideAds, forKey: "hideAds") } }
     @Published var hideOnline: Bool { didSet { defaults.set(hideOnline, forKey: "hideOnline") } }
+    @Published var notifications: Bool { didSet { defaults.set(notifications, forKey: "notifications") } }
     @Published var hasSeenSetup: Bool { didSet { defaults.set(hasSeenSetup, forKey: "hasSeenSetup") } }
 
     init() {
@@ -20,6 +21,7 @@ final class FilterSettings: ObservableObject {
             "hideExploreGrid": true,
             "hideAds": true,
             "hideOnline": true,
+            "notifications": true,
             "hasSeenSetup": false,
         ])
         blockReelsTab = defaults.bool(forKey: "blockReelsTab")
@@ -28,6 +30,7 @@ final class FilterSettings: ObservableObject {
         hideExploreGrid = defaults.bool(forKey: "hideExploreGrid")
         hideAds = defaults.bool(forKey: "hideAds")
         hideOnline = defaults.bool(forKey: "hideOnline")
+        notifications = defaults.bool(forKey: "notifications")
         hasSeenSetup = defaults.bool(forKey: "hasSeenSetup")
     }
 

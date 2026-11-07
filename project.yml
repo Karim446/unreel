@@ -19,6 +19,7 @@ targets:
         CADisableMinimumFrameDurationOnPhone: true
         NSCameraUsageDescription: Take a photo to send in a chat.
         NSMicrophoneUsageDescription: Record voice messages in chats.
+        UIBackgroundModes: [audio]
         CFBundleURLTypes:
           - CFBundleURLName: unreel
             CFBundleURLSchemes: [unreel]
