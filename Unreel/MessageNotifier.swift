@@ -24,6 +24,10 @@ import WebKit
 final class MessageNotifier: NSObject, ObservableObject, UNUserNotificationCenterDelegate {
     static let shared = MessageNotifier()
 
+    /// The in-app "new DM" alerts are off: real notifications now come from the
+    /// relay server through Bark, and these would only add duplicate generic alerts.
+    static let inAppAlerts = false
+
     /// Shown in Filters so you can see whether checking is working.
     @Published var status = "Not checked yet"
     @Published var bridgeStatus = "No website signals received yet"
@@ -47,7 +51,7 @@ final class MessageNotifier: NSObject, ObservableObject, UNUserNotificationCente
         siteDmBadgeStatus = "Instagram website badge: " + (present ? "red" : "clear")
         // Initial value is only a baseline, not a new DM. Red -> red is not a new event.
         guard previous == false && present else { return }
-        guard defaults.object(forKey: "notifications") as? Bool ?? true else {
+        guard Self.inAppAlerts else {
             siteDmBadgeStatus = "New red badge, but DM alerts are disabled in Filters"
             return
         }
@@ -94,7 +98,7 @@ final class MessageNotifier: NSObject, ObservableObject, UNUserNotificationCente
             status = "DM observer: unread count \(previous) -> \(count); no increase"
             return
         }
-        guard defaults.object(forKey: "notifications") as? Bool ?? true else { return }
+        guard Self.inAppAlerts else { return }
 
         status = "Unread badge increased: \(previous) -> \(count)"
         Task {

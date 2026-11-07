@@ -190,7 +190,6 @@
     lastPath = path;
     pathChangedAt = Date.now();
     spaNavigated = true;
-    setTimeout(() => refreshUnread(true), 1500);
     reportRoute();
     const target = decide(path, from);
     if (target && target !== path) location.replace(target);
@@ -361,14 +360,25 @@
       drag.axis = Math.abs(dy) > Math.abs(dx) ? 'y' : 'x';
     }
     // Keep the drag away from Instagram so it can't scroll to the next reel.
-    e.preventDefault();
+    // (Blocking the native scroll itself is done by a listener on the reel viewer
+    // only; see armViewer. A blocking listener on the whole window would make
+    // every scroll in the app wait on script, which is what makes scrolling stutter.)
     e.stopImmediatePropagation();
     const dist = drag.axis === 'y' ? dy : Math.max(0, dx);
     const el = root();
     el.style.transition = 'none';
     el.style.transform = drag.axis === 'y' ? `translateY(${dist}px)` : `translateX(${dist}px)`;
     el.style.opacity = String(Math.max(0.4, 1 - Math.abs(dist) / 600));
-  }, { capture: true, passive: false });
+  }, { capture: true, passive: true });
+
+  // Only the open reel viewer gets a blocking touch listener (to stop the page
+  // scrolling under your swipe). Everywhere else, touches never wait on script.
+  function armViewer(video) {
+    const box = video.closest('[role="dialog"]') || (video.parentElement && video.parentElement.parentElement) || video.parentElement;
+    if (!box || box.__unreelArmed) return;
+    box.__unreelArmed = true;
+    box.addEventListener('touchmove', (e) => { if (drag && drag.axis) e.preventDefault(); }, { passive: false });
+  }
 
   // Instagram may also listen to pointer events; swallow them mid-drag.
   for (const type of ['pointermove', 'pointerup']) {
@@ -401,7 +411,7 @@
       el.style.transform = '';
       el.style.opacity = '';
     }
-  }, { capture: true, passive: false });
+  }, { capture: true, passive: true });
 
   window.addEventListener('touchcancel', () => {
     if (drag) resetPage(false);
@@ -434,11 +444,30 @@
 
   // The like button for this photo/video: the big heart under a feed post, or
   // the big heart overlaid on the right edge of a full-screen reel.
+  // Is this heart the one actually showing? After you like and unlike, Instagram
+  // can keep the old "Unlike" heart in the page (fading out or hidden behind the
+  // new one). Reading that stale heart made a second double-tap think the post was
+  // already liked and do nothing. So only a heart that's really on top counts.
+  function heartShowing(icon) {
+    const r = icon.getBoundingClientRect();
+    if (r.width < 16 || r.height < 16) return false;
+    for (let el = icon, i = 0; el && i < 4; el = el.parentElement, i++) {
+      const cs = getComputedStyle(el);
+      const opacity = cs.opacity === '' ? 1 : Number(cs.opacity);
+      if (cs.display === 'none' || cs.visibility === 'hidden' || opacity < 0.2) return false;
+    }
+    const hit = document.elementFromPoint ? document.elementFromPoint(r.left + r.width / 2, r.top + r.height / 2) : null;
+    return !hit || hit === icon || icon.contains(hit) || hit.contains(icon) ||
+      !!(hit.closest && hit.closest('button, [role="button"]') && hit.closest('button, [role="button"]').contains(icon));
+  }
+
   function likeIconFor(media) {
     const mr = media.getBoundingClientRect();
     const scope = media.closest('article') || media.closest('[role="dialog"]') || document;
-    const icons = [...scope.querySelectorAll('svg[aria-label="Like"], svg[aria-label="Unlike"]')]
-      .filter((icon) => icon.getBoundingClientRect().width >= 20);   // comment hearts are tiny
+    const all = [...scope.querySelectorAll('svg[aria-label="Like"], svg[aria-label="Unlike"]')]
+      .filter((icon) => icon.getBoundingClientRect().width >= 16);   // comment hearts are tiny
+    const showing = all.filter(heartShowing);
+    const icons = showing.length ? showing : all;
     const below = icons.find((icon) => icon.getBoundingClientRect().top >= mr.bottom - 10);
     if (below) return below;
     return icons.find((icon) => {
@@ -446,6 +475,15 @@
       return r.left > mr.left + mr.width * 0.6 && r.top >= mr.top && r.bottom <= mr.bottom + 10;
     }) || null;
   }
+
+  // Instagram's own double-tap handling (where it has any) would race with ours
+  // and could undo a like. Double-taps on posts are handled only by Unreel.
+  window.addEventListener('dblclick', (e) => {
+    if (mediaAt(e.clientX, e.clientY)) {
+      e.preventDefault();
+      e.stopImmediatePropagation();
+    }
+  }, true);
 
   // ---- Liking through Instagram's own like request ---------------------------
   // Tapping the heart for you didn't always register, so a double-tap now sends
@@ -1386,144 +1424,133 @@
     }
   }
 
-  // ---- The "wall of doom": empty scrolling on the home feed --------------------
-  // Earlier versions tried to predict where the feed ends (counting hidden posts,
-  // measuring the last post). That kept failing because Instagram reserves space
-  // for posts in ways we can't see, and it scrolls a container we weren't
-  // watching. So now we simply look at the screen:
+  // ---- End of the home feed ----------------------------------------------------
+  // When everything Instagram loads past some point is a Reel or an ad (all
+  // hidden), the page turns into endless blank space. Older versions fought
+  // this by moving the scroll position from script, which felt janky, and used
+  // a floating card that stayed on screen when you scrolled back up.
   //
-  //  * Every scroll on the page is caught (in the capture phase, so it works no
-  //    matter which element is the one scrolling).
-  //  * We sample a few points in the middle of the screen. If none of them land
-  //    on real content (a picture, video, icon or text), the screen is empty.
-  //  * Empty space is skipped instantly: we jump ahead to the next real content.
-  //  * If we skip several screens' worth and find nothing, that's the end: we jump
-  //    back to the last real content, show "You're all caught up", and stop the
-  //    feed from loading or scrolling further.
+  // Now, once you've scrolled past the last real post and stopped, the feed is
+  // simply *trimmed* just below that post, with "You're all caught up" in the
+  // trimmed space. The page then genuinely ends there: iOS's own scrolling and
+  // bounce do the rest, nothing fights your finger, and the card is part of the
+  // page, so it scrolls away with the posts when you go back up.
   let feedScroller = null;          // whatever element actually scrolls the feed
-  let lastContentTop = 0;           // scroll position where real content was last on screen
-  let wallTop = null;               // scroll position of the wall once reached (null = not yet)
-  let skipping = false;
+  let feedEnded = false;
+  let feedClip = null;              // the element we trimmed
+  let endTimer = null;
+  let fingerDown = false;
+  const CARD_SPACE = 230;           // room for the card below the last post
 
   const scrollerOf = (target) =>
     (!target || target === document || target === document.documentElement || target === document.body)
       ? (document.scrollingElement || document.documentElement) : target;
+  const isDocScroller = (sc) => sc === document.scrollingElement || sc === document.documentElement;
 
-  function hasContentAt(x, y) {
-    for (const el of document.elementsFromPoint(x, y).slice(0, 8)) {
-      if (el.closest('#unreel-tabbar, #unreel-caught-up, [data-unreel-header]')) continue;
-      if (el === document.documentElement || el === document.body) return false;
-      if (/^(IMG|VIDEO|SVG|CANVAS|PICTURE)$/i.test(el.tagName)) return true;
-      for (const n of el.childNodes) if (n.nodeType === 3 && n.textContent.trim()) return true;
-      // A post that's still loading shows as a grey/colored box: that's content too.
-      const cs = getComputedStyle(el);
-      if ((cs.backgroundImage && cs.backgroundImage !== 'none') ||
-          (!isTransparent(cs.backgroundColor) && cs.backgroundColor !== getComputedStyle(document.body).backgroundColor &&
-           el.getBoundingClientRect().width > window.innerWidth * 0.4)) return true;
-    }
-    return false;
+  // Turn a screen position into a position on the scrolling page.
+  function pageY(sc, screenY) {
+    return isDocScroller(sc)
+      ? screenY + window.scrollY
+      : screenY - sc.getBoundingClientRect().top + sc.scrollTop;
   }
 
-  function screenHasContent() {
-    // Any visible post on screen counts, even before its picture has loaded.
+  function lastShownPost() {
+    let last = null;
+    let lastBottom = -Infinity;
     for (const post of document.querySelectorAll('article')) {
       if (post.__unreelHide) continue;
       const r = post.getBoundingClientRect();
-      if (r.height > 0 && r.bottom > window.innerHeight * 0.15 && r.top < window.innerHeight * 0.85) return true;
+      if (r.height > 0 && r.bottom > lastBottom) { lastBottom = r.bottom; last = post; }
     }
-    const x = window.innerWidth / 2;
-    return [0.25, 0.4, 0.55, 0.7].some((f) => hasContentAt(x, window.innerHeight * f) ||
-      hasContentAt(window.innerWidth * 0.2, window.innerHeight * f));
+    return last;
   }
 
-  function showCaughtUp(show) {
+  // The element holding the whole feed, to trim. Prefer <main>.
+  function feedContainer(post, sc) {
+    const main = document.querySelector('main, [role="main"]');
+    if (main && main.contains(post)) return main;
+    let el = post;
+    while (el.parentElement && el.parentElement !== sc && el.parentElement !== document.body) el = el.parentElement;
+    return el;
+  }
+
+  // Past the last real post, with nothing real below it on screen?
+  function pastTheEnd(sc) {
+    const post = lastShownPost();
+    if (!post) return false;
+    const lastBottom = pageY(sc, post.getBoundingClientRect().bottom);
+    const screenBottom = pageY(sc, window.innerHeight);
+    return screenBottom > lastBottom + window.innerHeight * 0.45;
+  }
+
+  function endFeed(sc) {
+    const post = lastShownPost();
+    if (!post) return;
+    const clip = feedContainer(post, sc);
+    const clipTop = pageY(sc, clip.getBoundingClientRect().top);
+    const end = pageY(sc, post.getBoundingClientRect().bottom) + CARD_SPACE;
+
+    feedEnded = true;
+    feedClip = clip;
+    document.documentElement.classList.add('unreel-feed-end');   // also stops the endless loading
+    if (getComputedStyle(clip).position === 'static') clip.style.position = 'relative';
+    clip.style.maxHeight = `${Math.max(0, end - clipTop)}px`;
+    clip.style.overflow = 'hidden';
+
     let card = document.getElementById('unreel-caught-up');
-    document.documentElement.classList.toggle('unreel-feed-end', wallTop !== null);
-    if (!show) { if (card) card.classList.remove('show'); return; }
     if (!card) {
       card = document.createElement('div');
       card.id = 'unreel-caught-up';
       card.innerHTML = '<div class="unreel-check">✓</div><div class="unreel-title">You\u2019re all caught up</div><div class="unreel-sub">Everything else here was Reels or ads.</div>';
-      document.body.appendChild(card);
     }
-    card.classList.add('show');
+    clip.appendChild(card);
+    requestAnimationFrame(() => card.classList.add('show'));
+    // The page is now shorter; iOS settles you at the new end on its own.
   }
 
-  function checkForWall() {
-    if (location.pathname !== '/' || skipping) return;
-    const sc = feedScroller || scrollerOf(null);
-    const top = sc.scrollTop;
-
-    if (wallTop !== null) {
-      // Past the wall: hold the position. Near it: show the card.
-      if (top > wallTop) sc.scrollTop = wallTop;
-      showCaughtUp(top >= wallTop - 40);
-      return;
+  function unendFeed() {
+    feedEnded = false;
+    document.documentElement.classList.remove('unreel-feed-end');
+    const card = document.getElementById('unreel-caught-up');
+    if (card) card.remove();
+    if (feedClip) {
+      feedClip.style.maxHeight = '';
+      feedClip.style.overflow = '';
+      feedClip = null;
     }
-    if (screenHasContent()) { lastContentTop = top; return; }
-
-    // Empty screen: skip ahead to the next real content.
-    skipping = true;
-    const step = window.innerHeight * 0.8;
-    let jumped = 0;
-    const hop = () => {
-      const max = sc.scrollHeight - sc.clientHeight;
-      if (screenHasContent()) { skipping = false; lastContentTop = sc.scrollTop; return; }
-      if (jumped > window.innerHeight * 6 || sc.scrollTop >= max - 2) {
-        // Nothing for several screens (or nothing left): that's the end. Walk
-        // forward from the last place we saw content to find where it really stops.
-        let lastGood = lastContentTop;
-        for (let p = lastContentTop; p <= lastContentTop + window.innerHeight * 8; p += window.innerHeight * 0.15) {
-          sc.scrollTop = p;
-          if (screenHasContent()) lastGood = p; else if (p - lastGood > window.innerHeight * 0.6) break;
-        }
-        wallTop = Math.max(0, lastGood + window.innerHeight * 0.05);   // last posts stay on screen above the card
-        sc.scrollTop = wallTop;
-        skipping = false;
-        showCaughtUp(true);
-        return;
-      }
-      sc.scrollTop = Math.min(max, sc.scrollTop + step);
-      jumped += step;
-      requestAnimationFrame(hop);
-    };
-    requestAnimationFrame(hop);
   }
 
-  // Only look once scrolling has come to rest and your finger is off the screen:
-  // moving the page while you're swiping or while it's still gliding is what made
-  // it feel janky and jump back.
-  let wallTimer = null;
-  let fingerDown = false;
   window.addEventListener('touchstart', () => { fingerDown = true; }, { capture: true, passive: true });
   window.addEventListener('touchend', () => { fingerDown = false; }, { capture: true, passive: true });
   window.addEventListener('touchcancel', () => { fingerDown = false; }, { capture: true, passive: true });
 
-  function scheduleWallCheck() {
-    clearTimeout(wallTimer);
-    wallTimer = setTimeout(() => {
-      if (fingerDown) return scheduleWallCheck();
-      // Hold the wall immediately; everything else needs the screen to stay empty.
-      if (wallTop !== null || screenHasContent()) return checkForWall();
-      setTimeout(() => { if (!fingerDown && !screenHasContent()) checkForWall(); else if (screenHasContent()) checkForWall(); }, 350);
-    }, 180);
+  // Only decide once scrolling has fully stopped (finger up, glide finished), and
+  // only if it's still past the end a moment later (posts may still be loading).
+  function scheduleEndCheck() {
+    clearTimeout(endTimer);
+    endTimer = setTimeout(() => {
+      if (feedEnded || location.pathname !== '/') return;
+      if (fingerDown) return scheduleEndCheck();
+      const sc = feedScroller || scrollerOf(null);
+      if (!pastTheEnd(sc)) return;
+      endTimer = setTimeout(() => {
+        if (!feedEnded && !fingerDown && location.pathname === '/' && pastTheEnd(sc)) endFeed(sc);
+      }, 900);
+    }, 250);
   }
 
   document.addEventListener('scroll', (e) => {
-    if (location.pathname !== '/' || skipping) return;
+    if (location.pathname !== '/' || feedEnded) return;
     feedScroller = scrollerOf(e.target);
-    // Past the wall: stop right away, even mid-swipe.
-    if (wallTop !== null && feedScroller.scrollTop > wallTop) { feedScroller.scrollTop = wallTop; showCaughtUp(true); return; }
-    scheduleWallCheck();
+    scheduleEndCheck();
   }, { capture: true, passive: true });
 
-  // Leaving the feed resets the wall, so new posts can show next time.
+  // Leaving the feed (or reloading it) brings the full feed back.
   let wallPath = location.pathname;
   function resetWallOnNavigate() {
     if (location.pathname === wallPath) return;
     wallPath = location.pathname;
-    wallTop = null; lastContentTop = 0; skipping = false;
-    showCaughtUp(false);
+    unendFeed();
   }
 
   // ---- Stories: start with sound, skip ads -------------------------------------
@@ -1763,28 +1790,35 @@
   function tidySeenLabel() {
     if (!location.pathname.startsWith('/direct/t/')) return;
     const W = window.innerWidth;
-    for (const el of document.querySelectorAll('span, div')) {
-      if (el.childElementCount || !SEEN_TEXT.test(el.textContent.trim())) continue;
+    // Find "Seen …" labels directly (native XPath search, no walking every element).
+    const found = document.evaluate("//*[self::span or self::div][not(*)][starts-with(normalize-space(.), 'Seen')]",
+      document, null, XPathResult.ORDERED_NODE_SNAPSHOT_TYPE, null);
+    for (let k = 0; k < found.snapshotLength; k++) {
+      const el = found.snapshotItem(k);
+      if (!SEEN_TEXT.test(el.textContent.trim())) continue;
       const label = el.getBoundingClientRect();
       if (!label.height) continue;
-      // The message right above the label: the nearest text bubble, ignoring
-      // centered lines (times, "New messages") and anything full-width.
+      // The label's row in the message list, then the few rows just above it.
+      let row = el;
+      while (row.parentElement && row.parentElement.childElementCount < 3 && row.parentElement !== document.body) row = row.parentElement;
       let nearest = null;
-      for (const t of document.querySelectorAll('span, div')) {
-        if (t === el || t.childElementCount) continue;
-        const text = t.textContent.trim();
-        if (!text || SEEN_TEXT.test(text)) continue;
-        const r = t.getBoundingClientRect();
-        if (!r.height || r.bottom > label.top + 2 || r.bottom < label.top - 260) continue;
-        const centered = Math.abs((r.left + r.right) / 2 - W / 2) < W * 0.08 && r.width < W * 0.6;
-        if (centered || r.width > W * 0.85) continue;
-        if (!nearest || r.bottom > nearest.bottom) nearest = r;
+      for (let prev = row.previousElementSibling, n = 0; prev && n < 6 && !nearest; prev = prev.previousElementSibling, n++) {
+        const leaves = [...prev.querySelectorAll('span, div')].filter((t) => !t.childElementCount && t.textContent.trim());
+        for (let i = leaves.length - 1; i >= 0; i--) {
+          const r = leaves[i].getBoundingClientRect();
+          if (!r.height || SEEN_TEXT.test(leaves[i].textContent.trim())) continue;
+          const centered = Math.abs((r.left + r.right) / 2 - W / 2) < W * 0.08 && r.width < W * 0.6;
+          if (centered || r.width > W * 0.85) continue;   // times, "New messages", full-width rows
+          nearest = r;
+          break;
+        }
       }
       // Yours sit on the right; theirs on the left.
       const theirs = nearest && (nearest.left + nearest.right) / 2 < W / 2;
       el.style.display = theirs ? 'none' : '';
     }
   }
+
 
 
   // ---- Unread count on the Messages tab -----------------------------------------
@@ -1830,7 +1864,8 @@
       window.webkit?.messageHandlers?.unread?.postMessage(count);   // icon badge and DM notification observer
     }
   }
-  setInterval(() => refreshUnread(false), 5000);
+  // (No polling: Instagram refuses these requests from the page, so polling only
+  // wasted work every few seconds. The site's own live badge is mirrored instead.)
 
   // ---- Green "online" dots on people in the inbox ---------------------------------
   // The app shows a green dot on anyone active, including people in the notes row.
@@ -1936,6 +1971,8 @@
     // Our tab bar: Instagram's icons in equal-width columns, pinned to the bottom.
     '#unreel-tabbar { position: fixed; left: 0; right: 0; bottom: 0; z-index: 2147483000; display: flex; align-items: stretch; }',
     '.unreel-under-sheet #unreel-tabbar { z-index: 0; }',
+    // Keep the tab bar on its own GPU layer so scrolling never repaints it.
+    '#unreel-tabbar { transform: translateZ(0); will-change: transform; contain: layout style paint; }',
     // While typing, neither bar shows (like the app); Instagram's would float over the keyboard.
     '.unreel-typing [data-unreel-sitenav] { display: none !important; }',
     '.unreel-tab { flex: 1 1 0; display: flex; align-items: center; justify-content: center; color: inherit; text-decoration: none; }',
@@ -1961,8 +1998,8 @@
     '[data-unreel-status]::after { content: attr(data-unreel-status); font-size: 14px; opacity: 0.65; }',
     // End of the feed: stop the endless loading once everything left is hidden.
     '.unreel-feed-end [role="progressbar"], .unreel-feed-end [data-visualcompletion="loading-state"], .unreel-feed-end svg[aria-label^="Loading"] { display: none !important; }',
-    '#unreel-caught-up { position: fixed; left: 0; right: 0; bottom: 60px; text-align: center; padding: 24px; color: #f5f5f5; opacity: 0; transform: translateY(12px); transition: opacity .25s, transform .25s; pointer-events: none; z-index: 5; }',
-    '#unreel-caught-up.show { opacity: 1; transform: none; }',
+    '#unreel-caught-up { position: absolute; left: 0; right: 0; bottom: 0; height: 230px; box-sizing: border-box; padding-top: 40px; text-align: center; color: #f5f5f5; opacity: 0; transition: opacity .3s ease; pointer-events: none; }',
+    '#unreel-caught-up.show { opacity: 1; }',
     '@media (prefers-color-scheme: light) { #unreel-caught-up { color: #000; } }',
     '#unreel-caught-up .unreel-check { width: 64px; height: 64px; margin: 0 auto 14px; border-radius: 50%; border: 2px solid currentColor; display: flex; align-items: center; justify-content: center; font-size: 30px; opacity: 0.9; }',
     '#unreel-caught-up .unreel-title { font-size: 20px; font-weight: 600; }',
@@ -2003,11 +2040,26 @@
   const REEL_LINK = 'a[href*="/reel/"], a[href*="/reels/"]';
 
   // Cheap work that must happen right away (so hidden things never flash on screen).
+  // While you're scrolling, only the work that must happen right away runs
+  // (hiding Reels/ads before they reach the screen, noticing page changes). The
+  // rest waits until scrolling settles, so the page never stutters mid-scroll.
+  let lastScrollAt = 0;
+  let deferredSweep = null;
+  document.addEventListener('scroll', () => { lastScrollAt = performance.now(); }, { capture: true, passive: true });
+  const scrollingNow = () => performance.now() - lastScrollAt < 160;
+
   function sweep() {
     const path = location.pathname;
 
     resetWallOnNavigate();
     if (path === '/') updateFeed();
+
+    if (scrollingNow()) {
+      check(lastPath);
+      clearTimeout(deferredSweep);
+      deferredSweep = setTimeout(scheduleSweep, 200);
+      return;
+    }
 
     // Explore: keep the search box and results, hide the endless grid of posts
     // (and its loading spinner, which would otherwise spin forever).
@@ -2033,7 +2085,6 @@
 
     // Keep the tab bar in step with the page in the same frame (no flicker).
     updateTabBar();
-    inspectSiteDmBadge();
     updateHeader();
     updateInboxStatus();
     updatePeek();
@@ -2046,6 +2097,7 @@
   // Heavier checks that measure the page. Throttled so they never run every frame
   // (that was making scrolling and the keyboard animation stutter).
   function slowSweep() {
+    if (scrollingNow()) { scheduleSlowSweep(); return; }   // wait until scrolling settles
     reportTheme();
     updateTabBar(true);
     updateViewerSearch();
@@ -2056,7 +2108,7 @@
 
     const video = document.querySelector('video') ? viewerVideo() : null;
     if (video) {
-      if (reelsRestricted) lockScroll(video);
+      if (reelsRestricted) { lockScroll(video); armViewer(video); }
       startUnmuted(video);
     } else if (locked.size) {
       unlockScroll();
@@ -2125,7 +2177,6 @@
   function start() {
     paintBackground(window.__UNREEL_BG__);
     reportRoute();
-    refreshUnread(true);
     addStyle();
     lockViewport();
     sweep();

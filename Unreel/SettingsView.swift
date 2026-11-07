@@ -7,7 +7,7 @@ struct SettingsView: View {
     var openEditProfile: () -> Void
     var resetCache: () -> Void
     @State private var confirmReset = false
-    @ObservedObject private var notifier = MessageNotifier.shared
+    @State private var relayCopyStatus = ""
 
     /// Copies the Instagram cookies the relay's bridge asks for, as JSON.
     private func copyRelayLogin() {
@@ -19,11 +19,10 @@ struct SettingsView: View {
             }
             let data = (try? JSONSerialization.data(withJSONObject: values, options: [.sortedKeys])) ?? Data()
             UIPasteboard.general.string = String(data: data, encoding: .utf8)
-            Task { @MainActor in
-                MessageNotifier.shared.status = values["sessionid"] == nil
-                    ? "Not logged in: open Instagram in Unreel first."
-                    : "Copied \(values.count) cookies. Paste them only into your own relay."
-            }
+            let message = values["sessionid"] == nil
+                ? "Not logged in: open Instagram in Unreel first."
+                : "Copied. Paste it only into your own relay."
+            Task { @MainActor in relayCopyStatus = message }
         }
     }
 
@@ -66,27 +65,14 @@ struct SettingsView: View {
                     Text("Peek: long-press a chat in your inbox to read it without sending \"Seen\". Tap \"Mark as read\" in the chat when you're ready.")
                 }
                 Section {
-                    Toggle("Alert on new unread DMs while app is running", isOn: $settings.notifications)
-                    Text("Website signal: \(notifier.bridgeStatus)")
-                        .font(.footnote).foregroundStyle(.secondary).textSelection(.enabled)
-                    Button("Test JavaScript Bridge") {
-                        guard let view = WebViewStore.current?.webView else {
-                            notifier.bridgeStatus = "No active WKWebView instance"
-                            return
-                        }
-                        // Read only our own badge, not the account or messages.
-                        view.evaluateJavaScript("window.webkit.messageHandlers.unreelDiag.postMessage('Manual bridge OK; Unreel badge: ' + (document.querySelector('#unreel-tabbar .unreel-badge')?.textContent || 'none'))")
-                    }
-                    Button("Test Local Notification") { notifier.sendTest() }
-                    Text(notifier.siteDmBadgeStatus)
-                        .font(.footnote).foregroundStyle(.secondary).textSelection(.enabled)
-                    Button("Test Inbox Check") { Task { await notifier.testCheck() } }
-                    Text(notifier.status).font(.footnote).foregroundStyle(.secondary).textSelection(.enabled)
                     Button("Copy Login for Relay Server") { copyRelayLogin() }
+                    if !relayCopyStatus.isEmpty {
+                        Text(relayCopyStatus).font(.footnote).foregroundStyle(.secondary)
+                    }
                 } header: {
-                    Text("Notifications (experimental)")
+                    Text("Notification relay")
                 } footer: {
-                    Text("Unread alerts reuse the Inbox badge count and cannot reliably run while Unreel is closed. Test Inbox Check still probes the old failing inbox endpoint. Copy Login copies your Instagram session cookies so the relay server can connect as you. Treat it like a password: paste it only into your own server.")
+                    Text("Only needed if your server says the Instagram login needs attention: this copies your Instagram session so you can log the relay back in. Treat it like a password and paste it only into your own server.")
                 }
                 Section {
                     Button("Reset Cache", role: .destructive) { confirmReset = true }
