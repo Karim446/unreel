@@ -67,6 +67,16 @@ struct SettingsView: View {
                 }
                 Section {
                     Toggle("Alert on new unread DMs while app is running", isOn: $settings.notifications)
+                    Text("Website signal: \(notifier.bridgeStatus)")
+                        .font(.footnote).foregroundStyle(.secondary).textSelection(.enabled)
+                    Button("Test JavaScript Bridge") {
+                        guard let view = WebViewStore.current?.webView else {
+                            notifier.bridgeStatus = "No active WKWebView instance"
+                            return
+                        }
+                        // Read only our own badge, not the account or messages.
+                        view.evaluateJavaScript("window.webkit.messageHandlers.unreelDiag.postMessage('Manual bridge OK; Unreel badge: ' + (document.querySelector('#unreel-tabbar .unreel-badge')?.textContent || 'none'))")
+                    }
                     Button("Test Local Notification") { notifier.sendTest() }
                     Button("Test Inbox Check") { Task { await notifier.testCheck() } }
                     Text(notifier.status).font(.footnote).foregroundStyle(.secondary).textSelection(.enabled)

@@ -26,6 +26,7 @@ final class MessageNotifier: NSObject, ObservableObject, UNUserNotificationCente
 
     /// Shown in Filters so you can see whether checking is working.
     @Published var status = "Not checked yet"
+    @Published var bridgeStatus = "No website signals received yet"
 
     private var timer: Timer?
     private var keepAlive: AVAudioPlayer?

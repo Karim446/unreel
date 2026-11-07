@@ -52,6 +52,7 @@ final class WebViewStore: NSObject, ObservableObject, WKNavigationDelegate, WKUI
         webView.configuration.userContentController.add(self, name: "haptic")
         webView.configuration.userContentController.add(self, name: "route")
         webView.configuration.userContentController.add(self, name: "unread")
+        webView.configuration.userContentController.add(self, name: "unreelDiag")
         webView.hideKeyboardAccessoryBar()
         webView.customUserAgent = Self.safariUA
         // WebKit's built-in back swipe shows a snapshot of the previous page, and for
@@ -290,7 +291,12 @@ final class WebViewStore: NSObject, ObservableObject, WKNavigationDelegate, WKUI
         if message.name == "haptic", let style = message.body as? String {
             return Haptics.play(style)
         }
+        if message.name == "unreelDiag", let detail = message.body as? String {
+            MessageNotifier.shared.bridgeStatus = detail
+            return
+        }
         if message.name == "unread", let count = message.body as? Int {
+            MessageNotifier.shared.bridgeStatus = "Swift received unread count: \(count)"
             MessageNotifier.shared.setAppBadge(count)
             MessageNotifier.shared.observeLiveUnreadCount(count)
             return

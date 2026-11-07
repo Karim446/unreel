@@ -3,6 +3,7 @@
 (() => {
   if (window.__unreelLoaded) return;
   window.__unreelLoaded = true;
+  try { window.webkit?.messageHandlers?.unreelDiag?.postMessage('filter.js injected and running'); } catch (_) {}
 
   const cfg = Object.assign(
     { blockReelsTab: true, blockFeedReels: true, allowDMReels: true, hideExploreGrid: true, hideAds: true, hideOnline: true },
@@ -1750,6 +1751,7 @@
   // Send the first successful count, even zero, so Swift can establish a baseline.
   let hasUnreadBaseline = false;
   let lastBadgeFetch = 0;
+  let lastBadgeDiagnostic = '';
   async function refreshUnread(force) {
     if (!force && Date.now() - lastBadgeFetch < 20000) return;
     lastBadgeFetch = Date.now();
@@ -1768,6 +1770,13 @@
         if (inbox && typeof inbox.unseen_count === 'number') count = inbox.unseen_count;
         else if (inbox && inbox.threads) count = inbox.threads.filter((t) => t.read_state === 1).length;
       } catch (_) {}
+    }
+    const badgeDiagnostic = count === null
+      ? 'Instagram badge API did not return a numeric count'
+      : 'Instagram badge API count: ' + count;
+    if (badgeDiagnostic !== lastBadgeDiagnostic) {
+      lastBadgeDiagnostic = badgeDiagnostic;
+      try { window.webkit?.messageHandlers?.unreelDiag?.postMessage(badgeDiagnostic); } catch (_) {}
     }
     if (count !== null && (!hasUnreadBaseline || count !== unreadCount)) {
       hasUnreadBaseline = true;
