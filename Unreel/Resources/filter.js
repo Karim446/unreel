@@ -190,6 +190,7 @@
     lastPath = path;
     pathChangedAt = Date.now();
     spaNavigated = true;
+    setHomeClass();
     reportRoute();
     const target = decide(path, from);
     if (target && target !== path) location.replace(target);
@@ -275,18 +276,31 @@
   // Sound on by default. For the first 2 seconds after a viewer video appears we
   // make sure it's unmuted; after that (or once you touch the screen) your choice wins.
   let lastTouch = 0;
+  // Sound on by default, and Instagram's speaker icon always telling the truth.
+  // We turn sound on by pressing Instagram's *own* sound button (through its
+  // button code), so its icon and its memory of the setting update too. Before,
+  // the video was unmuted behind Instagram's back, so the icon still said muted.
   function startUnmuted(video) {
     if (video.__unreelSeen) return;
     const seen = (video.__unreelSeen = Date.now());
-    const attempt = () => {
-      if (lastTouch > seen || !video.muted) return;
+    const mutedIcon = () => {
       const scope = video.closest('[role="dialog"]') || document;
-      const mutedIcon = scope.querySelector('[aria-label="Audio is muted"]');
-      if (mutedIcon) fire(mutedIcon);
-      setTimeout(() => { if (video.muted && lastTouch <= seen) { video.muted = false; video.volume = 1; } }, 120);
+      return [...scope.querySelectorAll('svg[aria-label="Audio is muted"], [aria-label="Audio is muted"]')]
+        .find((el) => el.getBoundingClientRect().width > 0) || null;
     };
-    [0, 300, 800, 1500].forEach((ms) => setTimeout(attempt, ms));
+    const attempt = () => {
+      if (lastTouch > seen) return;          // you've touched the screen since: your choice wins
+      const icon = mutedIcon();
+      if (icon) {
+        if (!pressViaReact(icon)) fire(icon);
+        return;
+      }
+      // Instagram already shows sound on: make sure the video agrees with the icon.
+      if (video.muted) { video.muted = false; video.volume = 1; }
+    };
+    [0, 250, 700, 1400].forEach((ms) => setTimeout(attempt, ms));
   }
+
 
   // Swipe to close: drag the video down, up, or right and let go.
   const root = () => document.body;
@@ -479,6 +493,7 @@
   // Instagram's own double-tap handling (where it has any) would race with ours
   // and could undo a like. Double-taps on posts are handled only by Unreel.
   window.addEventListener('dblclick', (e) => {
+    if (location.pathname.startsWith('/direct/')) return;   // chats: Instagram's own double-tap reaction
     if (mediaAt(e.clientX, e.clientY)) {
       e.preventDefault();
       e.stopImmediatePropagation();
@@ -681,6 +696,7 @@
 
   window.addEventListener('click', (e) => {
     if (replaying || !e.isTrusted) return;
+    if (location.pathname.startsWith('/direct/t/')) return handleChatTap(e);
     const media = mediaAt(e.clientX, e.clientY);
     if (!media) { pendingTap = null; return; }
 
@@ -1272,6 +1288,7 @@
     const t = e.changedTouches[0];
     const target = e.target.closest ? e.target : e.target.parentElement;
     if (!target || target.closest('input, textarea, [contenteditable="true"], a[href], button')) { lastMessageTap = null; return; }
+    if (chatMediaAt(t.clientX, t.clientY)) { lastMessageTap = null; return; }   // shared reels/photos: handled by reactWithHeart
 
     const now = Date.now();
     const isDouble = lastMessageTap && now - lastMessageTap.time < 350 &&
@@ -1297,131 +1314,82 @@
     }, 60);
   }, { capture: true, passive: true });
 
-  // ---- Home feed: hide Reels and ads, and stop the endless blank feed ---------
-  // Every video in the feed is a Reel now (many link to /p/, not /reel/), so a
-  // post counts as a Reel if it has a video or a Reel link. Ads are posts marked
-  // "Sponsored"/"Ad". We hide each post's whole slot in the feed list (not just
-  // the post), so no empty gap is left behind.
+  // ---- Home feed: hide Reels and ads ------------------------------------------
+  // How it works now (the approach content blockers like uBlock Origin use):
+  // Reel posts are hidden by a CSS rule, not by script. The browser applies it
+  // while it styles the page, before anything is painted, so a Reel never shows
+  // up and then vanishes, and there's no script running per post while you
+  // scroll. (Older versions found and hid posts from script a moment after they
+  // appeared, which is where the flicker and blank stretches came from.)
   //
-  // When almost everything Instagram loads is hidden, the site keeps fetching
-  // forever and you scroll through nothing. After a long run of hidden posts we
-  // end the feed with an "all caught up" card and stop the loading.
+  // Two safety rules:
+  //  * A post that has already been on screen is never hidden later, even if
+  //    Instagram only adds its video afterwards (that would make the page jump).
+  //    An IntersectionObserver marks posts as "seen" cheaply, off the scroll path.
+  //  * The rule only applies on the home feed, so post pages and profiles are
+  //    untouched.
+  // Ads can't be recognised by CSS (it can't read the word "Sponsored"), so a
+  // small script marks them once and the same CSS hides them.
+
+  const REEL_MARKERS = ['video', 'a[href*="/reel/"]', '[aria-label="Toggle audio"]',
+    'svg[aria-label="Audio is muted"]', 'svg[aria-label="Audio is playing"]'];
+  const REEL_POST = (prefix) => REEL_MARKERS
+    .map((m) => `${prefix} article:not([data-unreel-seen]):has(${m})`).join(',\n');
+  // Also hide the wrapper(s) that hold nothing but that post, so no gap is left.
+  const REEL_WRAPPER = (prefix) => REEL_MARKERS
+    .map((m) => `${prefix} div:has(> article:only-child:not([data-unreel-seen]):has(${m})),\n` +
+                `${prefix} div:has(> div:only-child > article:only-child:not([data-unreel-seen]):has(${m}))`).join(',\n');
+
+  function feedCss() {
+    const rules = [
+      '.unreel-home [data-unreel-hide], .unreel-home div:has(> [data-unreel-hide]:only-child) { display: none !important; }',
+    ];
+    if (cfg.blockFeedReels) {
+      rules.push(`${REEL_POST('.unreel-home')},\n${REEL_WRAPPER('.unreel-home')} { display: none !important; }`);
+    }
+    return rules;
+  }
 
   const AD_LABEL = /^(sponsored|ad|paid partnership with meta)$/i;
-
   function isAd(post) {
     for (const el of post.querySelectorAll('span, a, div')) {
       if (el.childElementCount === 0 && AD_LABEL.test(el.textContent.trim())) return true;
     }
     return false;
   }
-  const isReelPost = (post) => !!(post.querySelector('video') || post.querySelector(REEL_LINK) ||
-    post.querySelector('svg[aria-label="Audio is muted"], svg[aria-label="Audio is playing"], [aria-label="Toggle audio"], svg[aria-label="Clip"], svg[aria-label="Reel"]'));
 
-  // The post's slot: climb only through wrappers that hold nothing but this post.
-  // (Climbing further could hide neighbouring posts, or the whole feed.)
-  function feedSlot(post) {
-    let slot = post;
-    while (slot.parentElement && slot.parentElement !== document.body && slot.parentElement.childElementCount === 1) {
-      slot = slot.parentElement;
+  // Marks posts that have been on screen, so they're never hidden afterwards.
+  const seenObserver = 'IntersectionObserver' in window ? new IntersectionObserver((entries) => {
+    for (const e of entries) {
+      if (e.isIntersecting && e.boundingClientRect.height > 0) {
+        e.target.setAttribute('data-unreel-seen', '');
+        seenObserver.unobserve(e.target);
+      }
     }
-    return slot;
-  }
-
-  // Decisions are remembered per post (by its link), so a post never flips between
-  // hidden and shown. Instagram swaps videos in and out as you scroll, and
-  // re-deciding each time made the feed jump and flicker.
-  const hiddenPosts = new Set();
-  const keptPosts = new Set();
-  const postKey = (post) => {
-    const a = post.querySelector('a[href*="/p/"], a[href*="/reel/"]');
-    const m = a && a.getAttribute('href').match(SHORTCODE);
-    return m ? m[1] : null;
-  };
-
-
-  function decidePost(post) {
-    const key = postKey(post);
-    if (key && hiddenPosts.has(key)) return true;
-    if (key && keptPosts.has(key)) return false;
-    if (cfg.blockFeedReels && isReelPost(post)) return true;
-    if (cfg.hideAds && isAd(post)) return true;
-    const loaded = post.querySelector('img, video');
-    if (loaded && post.querySelector('header, a[href*="/p/"]')) return false;   // fully loaded, nothing to hide
-    return undefined;   // not loaded yet: decide on a later pass
-  }
-
-  // Hiding a post that's on screen (or above it) makes everything below jump,
-  // which is the flicker you saw: a post you were looking at vanished once its
-  // video loaded, and the page snapped to the next one. So posts are only ever
-  // hidden while they're still below the screen. Once a post has been on screen
-  // it stays, even if it later turns out to be a Reel.
-  function safeToHide(post) {
-    const r = feedSlot(post).getBoundingClientRect();
-    return r.height === 0 || r.top >= window.innerHeight;
-  }
-
-  function keep(post) {
-    post.__unreelHide = false;
-    post.__unreelRechecked = true;
-    const key = postKey(post);
-    if (key) { hiddenPosts.delete(key); keptPosts.add(key); }
-  }
+  }) : null;
 
   function updateFeed() {
-    const posts = [...document.querySelectorAll('article')];
-    if (!posts.length) return;
-    for (const post of posts) {
-      if (post.__unreelCollapsed) continue;
-      let hide = post.__unreelHide;
-      if (hide === undefined) {
-        const known = postKey(post);
-        const alreadyHidden = known && hiddenPosts.has(known);   // Instagram re-drew a post we'd hidden: keep it hidden
-        hide = decidePost(post);
-        if (hide === true && !alreadyHidden && !safeToHide(post)) { keep(post); continue; }
-        if (hide !== undefined) {
-          post.__unreelHide = hide;
-          const key = postKey(post);
-          if (key) (hide ? hiddenPosts : keptPosts).add(key);
-        }
-      }
-      // A kept post can still turn out to be a Reel once its video loads, but only
-      // hide it if you haven't seen it yet (it's still below the screen).
-      if (hide === false && cfg.blockFeedReels && !post.__unreelRechecked && post.querySelector('video')) {
-        post.__unreelRechecked = true;
-        if (safeToHide(post)) {
-          hide = post.__unreelHide = true;
-          const key = postKey(post);
-          if (key) { keptPosts.delete(key); hiddenPosts.add(key); }
-        }
-      }
-      if (hide) collapsePost(post);
+    for (const post of document.querySelectorAll('article:not([data-unreel-done])')) {
+      if (seenObserver && !post.__unreelObserved) { post.__unreelObserved = true; seenObserver.observe(post); }
+      // Ads: decide once the post's header has loaded.
+      if (!post.querySelector('header, img, video')) continue;   // not loaded yet: next pass
+      if (cfg.hideAds && !post.hasAttribute('data-unreel-seen') && isAd(post)) post.setAttribute('data-unreel-hide', '');
+      post.setAttribute('data-unreel-done', '');
     }
   }
 
-  function collapsePost(post) {
-    if (post.__unreelCollapsed) return;
-    post.__unreelCollapsed = true;
-    const kill = (el) => {
-      el.style.setProperty('display', 'none', 'important');
-      el.style.setProperty('height', '0', 'important');
-      el.style.setProperty('min-height', '0', 'important');
-      el.style.setProperty('margin', '0', 'important');
-      el.style.setProperty('padding', '0', 'important');
-    };
-    const slot = feedSlot(post);
-    kill(post);
-    if (slot !== post) kill(slot);
-    // A virtualized feed often wraps each post in a fixed-height placeholder.
-    let el = slot.parentElement;
-    for (let i = 0; el && el !== document.body && i < 4; el = el.parentElement, i++) {
-      if (el.querySelectorAll('article').length > 1) break;   // holds other posts: stop
-      const style = getComputedStyle(el);
-      if (style.position === 'absolute' || parseFloat(style.minHeight) > 0 || el.style.height) {
-        el.style.setProperty('height', '0', 'important');
-        el.style.setProperty('min-height', '0', 'important');
-      }
-    }
+  // Is a post actually showing (not hidden by the rules above)?
+  const shown = (post) => post.getBoundingClientRect().height > 0;
+
+  // Put the feed rules in place right away (this runs before Instagram draws
+  // anything), and mark when we're on the home feed so they only apply there.
+  const setHomeClass = () => document.documentElement.classList.toggle('unreel-home', location.pathname === '/');
+  setHomeClass();
+  {
+    const early = document.createElement('style');
+    early.id = 'unreel-feed-rules';
+    early.textContent = feedCss().join('\n');
+    document.documentElement.appendChild(early);
   }
 
   // ---- End of the home feed ----------------------------------------------------
@@ -1458,7 +1426,6 @@
     let last = null;
     let lastBottom = -Infinity;
     for (const post of document.querySelectorAll('article')) {
-      if (post.__unreelHide) continue;
       const r = post.getBoundingClientRect();
       if (r.height > 0 && r.bottom > lastBottom) { lastBottom = r.bottom; last = post; }
     }
@@ -1535,7 +1502,7 @@
       if (!pastTheEnd(sc)) return;
       endTimer = setTimeout(() => {
         if (!feedEnded && !fingerDown && location.pathname === '/' && pastTheEnd(sc)) endFeed(sc);
-      }, 900);
+      }, 400);
     }, 250);
   }
 
@@ -1544,6 +1511,27 @@
     feedScroller = scrollerOf(e.target);
     scheduleEndCheck();
   }, { capture: true, passive: true });
+
+  // The other way the end shows up: Instagram's loading spinner sits on screen
+  // while it fetches page after page of posts that are all hidden. If the
+  // spinner stays in view for 1.5 s and no new visible post arrives, that's the
+  // end too (checked twice a second, only on the home feed).
+  let spinnerSince = null;
+  let shownCountAtSpinner = 0;
+  setInterval(() => {
+    if (location.pathname !== '/' || feedEnded || fingerDown || scrollingNow()) { spinnerSince = null; return; }
+    const spinner = document.querySelector('main [role="progressbar"], main svg[aria-label^="Loading"], main [data-visualcompletion="loading-state"]');
+    const r = spinner && spinner.getBoundingClientRect();
+    const inView = r && r.height > 0 && r.top < window.innerHeight && r.bottom > 0;
+    if (!inView) { spinnerSince = null; return; }
+    const shownCount = [...document.querySelectorAll('article')].filter(shown).length;
+    if (spinnerSince === null || shownCount > shownCountAtSpinner) {
+      spinnerSince = performance.now();
+      shownCountAtSpinner = shownCount;
+      return;
+    }
+    if (performance.now() - spinnerSince > 1500) endFeed(feedScroller || scrollerOf(null));
+  }, 500);
 
   // Leaving the feed (or reloading it) brings the full feed back.
   let wallPath = location.pathname;
@@ -1930,6 +1918,129 @@
         dot.remove();
       }
     }
+  }
+
+  // ---- Hidden diagnostic: feed layout snapshot -------------------------------------
+  // Long-press the Instagram logo on the home feed for 1.5 s to copy a description
+  // of how the feed is *built* (element types, positions, sizes, which element
+  // scrolls). It contains no text, names, pictures or links, only structure. It
+  // lets the remaining feed issues be fixed against the real page instead of
+  // guesses.
+  function feedSnapshot() {
+    const out = [];
+    const sc = feedScroller || scrollerOf(null);
+    out.push(`viewport ${window.innerWidth}x${window.innerHeight} | scroller ${sc.tagName}${isDocScroller(sc) ? ' (page)' : ''} top=${Math.round(sc.scrollTop)} height=${sc.scrollHeight}`);
+    const describe = (el) => {
+      const cs = getComputedStyle(el);
+      const r = el.getBoundingClientRect();
+      const inline = ['position', 'top', 'transform', 'height', 'min-height', 'padding-top', 'padding-bottom']
+        .map((k) => el.style.getPropertyValue(k) ? `${k}:${el.style.getPropertyValue(k)}` : '').filter(Boolean).join(' ');
+      return `${el.tagName.toLowerCase()}${el.getAttribute('role') ? '[' + el.getAttribute('role') + ']' : ''} ` +
+        `pos=${cs.position} disp=${cs.display} ovf=${cs.overflowY} h=${Math.round(r.height)} y=${Math.round(r.top)} ` +
+        `kids=${el.childElementCount}${inline ? ' inline{' + inline + '}' : ''}`;
+    };
+    const post = document.querySelector('article');
+    if (!post) { out.push('no posts found'); return out.join('\n'); }
+    out.push('-- from first post up to <body>:');
+    for (let el = post, i = 0; el && el !== document.documentElement && i < 14; el = el.parentElement, i++) out.push('  ' + describe(el));
+    // The list that holds the posts: the first ancestor with several children.
+    let list = post.parentElement;
+    while (list && list.childElementCount < 3 && list !== document.body) list = list.parentElement;
+    if (list) {
+      out.push(`-- feed list: ${describe(list)}`);
+      [...list.children].slice(0, 40).forEach((c, i) => {
+        const art = c.matches('article') ? c : c.querySelector('article');
+        const flags = [art ? 'post' : 'other', art && art.querySelector('video') ? 'video' : '', art && art.hasAttribute('data-unreel-seen') ? 'seen' : '',
+          art && art.hasAttribute('data-unreel-hide') ? 'ad' : '', art && art.getBoundingClientRect().height === 0 ? 'hidden' : ''].filter(Boolean).join(',');
+        out.push(`  [${i}] ${describe(c)} {${flags}}`);
+      });
+    }
+    out.push(`-- spinner: ${document.querySelector('main [role="progressbar"], main svg[aria-label^="Loading"]') ? 'present' : 'none'} | ended: ${feedEnded}`);
+    return out.join('\n');
+  }
+
+  let snapTimer = null;
+  window.addEventListener('touchstart', (e) => {
+    const t = e.target.closest ? e.target : e.target.parentElement;
+    if (location.pathname !== '/' || !t || !t.closest('[data-unreel-brand]')) return;
+    snapTimer = setTimeout(() => {
+      haptic('medium');
+      window.webkit?.messageHandlers?.copyText?.postMessage(feedSnapshot());
+      showToast('Feed layout copied (structure only)');
+    }, 1500);
+  }, { capture: true, passive: true });
+  ['touchend', 'touchmove', 'touchcancel'].forEach((type) =>
+    window.addEventListener(type, () => clearTimeout(snapTimer), { capture: true, passive: true }));
+
+  // ---- Double-tap a shared reel/post in a chat to react with a heart -------------
+  // In the app, one tap on a shared reel opens it and a double-tap hearts the
+  // message. On the website the first tap already opens it, so a double-tap
+  // never gets the chance. Now a tap on a shared reel/post/photo in a chat waits
+  // a quarter of a second: a second tap reacts with a heart (using Instagram's
+  // own double-click reaction), otherwise the tap goes through and opens it.
+  let chatPending = null;
+
+  function chatMediaAt(x, y) {
+    for (const el of document.elementsFromPoint(x, y).slice(0, 10)) {
+      if (el.closest && el.closest('input, textarea, [contenteditable="true"], header, [data-unreel-header]')) return null;
+      if ((el.tagName === 'IMG' || el.tagName === 'VIDEO') && el.getBoundingClientRect().width >= 120) return el;
+    }
+    return null;
+  }
+
+  function heartsNear(el) {
+    const row = el.closest('[role="row"], [role="gridcell"], [role="listitem"]') || el.parentElement && el.parentElement.parentElement && el.parentElement.parentElement.parentElement || document.body;
+    return countHearts(row);
+  }
+
+  async function reactWithHeart(target, x, y) {
+    const before = heartsNear(target);
+    const opts = { bubbles: true, cancelable: true, view: window, clientX: x, clientY: y, detail: 2 };
+    // 1. Instagram's own double-click handler, if the message has one.
+    for (let node = target, i = 0; node && i < 14; node = node.parentElement, i++) {
+      const props = reactProps(node);
+      if (props && typeof props.onDoubleClick === 'function') {
+        try {
+          props.onDoubleClick({ type: 'dblclick', target, currentTarget: node, nativeEvent: new MouseEvent('dblclick', opts),
+            clientX: x, clientY: y, detail: 2, button: 0, preventDefault() {}, stopPropagation() {},
+            isDefaultPrevented: () => false, isPropagationStopped: () => false, persist() {} });
+        } catch (_) {}
+        break;
+      }
+    }
+    // 2. Otherwise (or as well), a double-click event on the message itself.
+    if (!(await waitFor(() => heartsNear(target) > before, 350))) target.dispatchEvent(new MouseEvent('dblclick', opts));
+    if (await waitFor(() => heartsNear(target) > before, 600)) haptic('medium');
+  }
+
+  function handleChatTap(e) {
+    const media = chatMediaAt(e.clientX, e.clientY);
+    if (!media) { chatPending = null; return; }
+    const now = Date.now();
+    if (chatPending && now - chatPending.time < DOUBLE_TAP_MS + 60 &&
+        Math.hypot(e.clientX - chatPending.x, e.clientY - chatPending.y) < 40) {
+      clearTimeout(chatPending.timer);
+      chatPending = null;
+      e.preventDefault();
+      e.stopImmediatePropagation();
+      reactWithHeart(media, e.clientX, e.clientY);
+      return;
+    }
+    // Hold this tap; replay it if no second tap comes.
+    e.preventDefault();
+    e.stopImmediatePropagation();
+    const original = e.target;
+    const x = e.clientX;
+    const y = e.clientY;
+    chatPending = {
+      time: now, x, y,
+      timer: setTimeout(() => {
+        chatPending = null;
+        replaying = true;
+        original.dispatchEvent(new MouseEvent('click', { bubbles: true, cancelable: true, clientX: x, clientY: y, view: window }));
+        replaying = false;
+      }, DOUBLE_TAP_MS),
+    };
   }
 
   // ---- Actions the app can trigger (Home Screen quick actions) ----------------

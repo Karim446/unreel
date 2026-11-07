@@ -52,6 +52,7 @@ final class WebViewStore: NSObject, ObservableObject, WKNavigationDelegate, WKUI
         webView.configuration.userContentController.add(self, name: "haptic")
         webView.configuration.userContentController.add(self, name: "route")
         webView.configuration.userContentController.add(self, name: "unread")
+        webView.configuration.userContentController.add(self, name: "copyText")
         webView.configuration.userContentController.add(self, name: "siteDmBadge")
         webView.configuration.userContentController.add(self, name: "unreelDiag")
         webView.hideKeyboardAccessoryBar()
@@ -298,6 +299,10 @@ final class WebViewStore: NSObject, ObservableObject, WKNavigationDelegate, WKUI
         }
         if message.name == "siteDmBadge", let present = message.body as? Bool {
             MessageNotifier.shared.observeSiteDmBadge(present)
+            return
+        }
+        if message.name == "copyText", let text = message.body as? String {
+            UIPasteboard.general.string = text   // the feed layout snapshot (structure only)
             return
         }
         if message.name == "unread", let count = message.body as? Int {
