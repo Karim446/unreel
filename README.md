@@ -11,7 +11,7 @@ Instagram without the Reels feed. Unreel shows instagram.com in a native iOS app
 - Reopens where you left off (except reels and login screens).
 - Long-press the app icon for Messages, New Post, and Filters.
 - Search box on your Story's viewer list.
-- Message notifications from Unreel itself (inbox checked every 15 s in the background; tap opens the chat; reading clears them). Filters → Message notifications.
+- DM notifications come from a small relay on a separate server (Instagram → mautrix-meta bridge → private Matrix → Bark). Tapping one opens that chat in Unreel via `unreel://thread/<id>`. The app itself can't receive pushes on a free Apple ID.
 - Reset Cache button in Filters.
 - Peek: long-press a chat in the inbox to read it without sending "Seen" (banner in the chat has "Mark as read").
 - Filters → Extras: switch the app icon, and a Bio Fonts generator (look-alike Unicode text for your bio).
