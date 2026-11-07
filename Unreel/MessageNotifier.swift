@@ -343,15 +343,31 @@ final class MessageNotifier: NSObject, ObservableObject, UNUserNotificationCente
         return last
     }
 
-    /// Instagram's own explanation for a refusal, shortened.
+    /// Instagram's own explanation for a refusal. It can be nested a few levels
+    /// deep ({"content": {"status": "..."}}), so we look for the first message-like
+    /// text anywhere in the answer.
     private static func reason(_ data: Data) -> String {
-        if let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any] {
-            let message = (json["message"] as? String) ?? (json["error_type"] as? String) ?? ""
-            if !message.isEmpty { return String(message.prefix(60)) }
+        if let json = try? JSONSerialization.jsonObject(with: data) {
+            if let text = firstMessage(in: json, depth: 0) { return String(text.prefix(140)) }
         }
-        let text = String(data: data.prefix(200), encoding: .utf8)?
+        let text = String(data: data.prefix(300), encoding: .utf8)?
             .replacingOccurrences(of: "\n", with: " ") ?? ""
-        return text.contains("<html") ? "(web page)" : String(text.prefix(60))
+        return text.contains("<html") ? "(web page)" : String(text.prefix(140))
+    }
+
+    private static func firstMessage(in value: Any, depth: Int) -> String? {
+        guard depth < 4 else { return nil }
+        if let dict = value as? [String: Any] {
+            for key in ["message", "error_title", "error_body", "feedback_message", "status", "error_type"] {
+                if let text = dict[key] as? String, !text.isEmpty, !["fail", "ok"].contains(text.lowercased()) {
+                    return text
+                }
+            }
+            for (_, nested) in dict {
+                if let found = firstMessage(in: nested, depth: depth + 1) { return found }
+            }
+        }
+        return nil
     }
 
     /// Who's online and the unread count, for the page (it can't ask the app
