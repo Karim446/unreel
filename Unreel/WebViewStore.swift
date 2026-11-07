@@ -26,6 +26,8 @@ final class WebViewStore: NSObject, ObservableObject, WKNavigationDelegate, WKUI
     private var appliedConfig: String?
     private let refreshControl = UIRefreshControl()
     private var urlObserver: NSKeyValueObservation?
+    private var pageDataTimer: Timer?
+    static weak var current: WebViewStore?
     private var jsAfterLoad: [String] = []
 
     override init() {
@@ -79,6 +81,17 @@ final class WebViewStore: NSObject, ObservableObject, WKNavigationDelegate, WKUI
             Task { @MainActor in Self.rememberLocation(wv.url) }
         }
 
+        // Unread count and who's online, fetched by the app (the page itself can't
+        // reach the address that answers these) and handed to the page.
+        pageDataTimer = Timer.scheduledTimer(withTimeInterval: 20, repeats: true) { _ in
+            Task { @MainActor in await WebViewStore.current?.pushPageData() }
+        }
+        WebViewStore.current = self
+        Task { @MainActor in
+            try? await Task.sleep(nanoseconds: 3_000_000_000)
+            await self.pushPageData()
+        }
+
         // Never leave the screen blank if the first load stalls.
         DispatchQueue.main.asyncAfter(deadline: .now() + 8) { [weak self] in self?.hasLoaded = true }
     }
@@ -123,6 +136,22 @@ final class WebViewStore: NSObject, ObservableObject, WKNavigationDelegate, WKUI
     }
 
     // MARK: Notifications and maintenance
+
+    func pushPageData() async {
+        guard UIApplication.shared.applicationState == .active else { return }
+        let data = await MessageNotifier.shared.fetchForPage()
+        var js = ""
+        if let unread = data.unread {
+            js += "window.__unreel && window.__unreel.setUnread(\(unread));"
+            MessageNotifier.shared.setAppBadge(unread)
+        }
+        if let presence = data.presence,
+           let json = try? JSONSerialization.data(withJSONObject: presence),
+           let text = String(data: json, encoding: .utf8) {
+            js += "window.__unreel && window.__unreel.setPresence(\(text));"
+        }
+        if !js.isEmpty { _ = try? await webView.evaluateJavaScript(js) }
+    }
 
     func openThread(_ id: String) {
         webView.load(URLRequest(url: URL(string: "direct/t/\(id)/", relativeTo: Self.home)!))

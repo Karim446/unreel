@@ -98,8 +98,13 @@ final class MessageNotifier: NSObject, ObservableObject, UNUserNotificationCente
                 content.title = "Unreel"
                 content.body = "Test notification: notifications are working."
                 content.sound = .default
-                let trigger = UNTimeIntervalNotificationTrigger(timeInterval: 5, repeats: false)
-                try? await UNUserNotificationCenter.current().add(UNNotificationRequest(identifier: "unreel-test", content: content, trigger: trigger))
+                let trigger = UNTimeIntervalNotificationTrigger(timeInterval: 3, repeats: false)
+                do {
+                    try await UNUserNotificationCenter.current().add(UNNotificationRequest(identifier: "unreel-test", content: content, trigger: trigger))
+                    MessageNotifier.shared.status = "Test sent: it should appear in 3 seconds."
+                } catch {
+                    MessageNotifier.shared.status = "Couldn't send the test: " + error.localizedDescription
+                }
             }
         }
     }
@@ -179,16 +184,9 @@ final class MessageNotifier: NSObject, ObservableObject, UNUserNotificationCente
             return
         }
 
-        var request = URLRequest(url: URL(string: "https://www.instagram.com/api/v1/direct_v2/inbox/?limit=20&persistentBadging=true")!)
-        request.setValue(cookies.map { "\($0.name)=\($0.value)" }.joined(separator: "; "), forHTTPHeaderField: "Cookie")
-        request.setValue(csrf, forHTTPHeaderField: "X-CSRFToken")
-        request.setValue("936619743392459", forHTTPHeaderField: "X-IG-App-ID")
-        request.setValue("XMLHttpRequest", forHTTPHeaderField: "X-Requested-With")
-        request.setValue(WebViewStore.safariUA, forHTTPHeaderField: "User-Agent")
-        request.setValue("https://www.instagram.com/direct/inbox/", forHTTPHeaderField: "Referer")
-        request.httpShouldHandleCookies = false
-
-        guard let result = try? await URLSession.shared.data(for: request) else {
+        let cookieHeader = cookies.map { "\($0.name)=\($0.value)" }.joined(separator: "; ")
+        guard let result = await Self.instagramGET("/api/v1/direct_v2/inbox/?limit=20&persistentBadging=true",
+                                                    cookie: cookieHeader, csrf: csrf) else {
             status = "Couldn't reach Instagram (" + Self.time(Date()) + ")"
             return
         }
@@ -269,6 +267,66 @@ final class MessageNotifier: NSObject, ObservableObject, UNUserNotificationCente
         }
     }
 
+
+    // MARK: Talking to Instagram
+
+    /// The inbox isn't available at the website's address for requests made outside
+    /// the page (it answers 404), so we try the website first and then the address
+    /// Instagram's own app uses, and remember whichever works.
+    private static var workingEndpoint: Int?   // index into `endpoints`
+
+    private static let endpoints: [(base: String, userAgent: String, appId: String)] = [
+        ("https://www.instagram.com", WebViewStore.safariUA, "936619743392459"),
+        ("https://i.instagram.com",
+         "Instagram 360.0.0.30.109 (iPhone15,2; iOS 18_6; en_US; en-US; scale=3.00; 1179x2556; 672535977)",
+         "124024574287414"),
+    ]
+
+    static func instagramGET(_ path: String, cookie: String, csrf: String) async -> (Data, URLResponse)? {
+        let order = workingEndpoint.map { w in [w] + endpoints.indices.filter { $0 != w } } ?? Array(endpoints.indices)
+        var last: (Data, URLResponse)?
+        for i in order {
+            let e = endpoints[i]
+            guard let url = URL(string: e.base + path) else { continue }
+            var request = URLRequest(url: url)
+            request.setValue(cookie, forHTTPHeaderField: "Cookie")
+            request.setValue(csrf, forHTTPHeaderField: "X-CSRFToken")
+            request.setValue(e.appId, forHTTPHeaderField: "X-IG-App-ID")
+            request.setValue("XMLHttpRequest", forHTTPHeaderField: "X-Requested-With")
+            request.setValue(e.userAgent, forHTTPHeaderField: "User-Agent")
+            request.setValue("https://www.instagram.com/direct/inbox/", forHTTPHeaderField: "Referer")
+            request.httpShouldHandleCookies = false
+            guard let result = try? await URLSession.shared.data(for: request) else { continue }
+            last = result
+            let code = (result.1 as? HTTPURLResponse)?.statusCode ?? 0
+            if code == 200, (try? JSONSerialization.jsonObject(with: result.0)) != nil {
+                workingEndpoint = i
+                return result
+            }
+        }
+        return last
+    }
+
+    /// Who's online and the unread count, for the page (it can't ask the app
+    /// address itself). Used while you're in the app.
+    func fetchForPage() async -> (unread: Int?, presence: [String: Any]?) {
+        let cookies = await WKWebsiteDataStore.default().httpCookieStore.allCookies()
+            .filter { $0.domain.contains("instagram.com") }
+        guard let csrf = cookies.first(where: { $0.name == "csrftoken" })?.value else { return (nil, nil) }
+        let cookieHeader = cookies.map { "\($0.name)=\($0.value)" }.joined(separator: "; ")
+        var unread: Int?
+        var presence: [String: Any]?
+        if let r = await Self.instagramGET("/api/v1/direct_v2/get_badge_count/?no_raven=1", cookie: cookieHeader, csrf: csrf),
+           let json = try? JSONSerialization.jsonObject(with: r.0) as? [String: Any] {
+            unread = json["badge_count"] as? Int
+        }
+        if let r = await Self.instagramGET("/api/v1/direct_v2/get_presence/", cookie: cookieHeader, csrf: csrf),
+           let json = try? JSONSerialization.jsonObject(with: r.0) as? [String: Any] {
+            presence = json["user_presence"] as? [String: Any]
+        }
+        return (unread, presence)
+    }
+
     // MARK: Badges and clearing
 
     func setAppBadge(_ count: Int) {
@@ -299,6 +357,9 @@ final class MessageNotifier: NSObject, ObservableObject, UNUserNotificationCente
     nonisolated func userNotificationCenter(_ center: UNUserNotificationCenter,
                                             willPresent notification: UNNotification,
                                             withCompletionHandler completionHandler: @escaping (UNNotificationPresentationOptions) -> Void) {
-        completionHandler([])   // in the app you're already looking at Instagram
+        // In the app you're already looking at Instagram, so message notifications
+        // stay quiet here; the test one always shows so you can see it works.
+        let isTest = notification.request.identifier == "unreel-test"
+        completionHandler(isTest ? [.banner, .list, .sound] : [])
     }
 }

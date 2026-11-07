@@ -1802,6 +1802,20 @@
   // ---- Actions the app can trigger (Home Screen quick actions) ----------------
 
   window.__unreel = {
+    // Data the app fetched for the page.
+    setUnread(n) {
+      if (typeof n !== 'number' || n === unreadCount) return;
+      unreadCount = n;
+      lastSig = '';
+      updateTabBar();
+    },
+    setPresence(map) {
+      if (!map || typeof map !== 'object') return;
+      onlineUsers = map;
+      lastPresenceFetch = Date.now();
+      updateOnlineDots();
+    },
+
     newPost() {
       let tries = 0;
       const attempt = () => {
