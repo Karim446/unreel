@@ -140,6 +140,7 @@ final class WebViewStore: NSObject, ObservableObject, WKNavigationDelegate, WKUI
 
     func pushPageData() async {
         guard UIApplication.shared.applicationState == .active else { return }
+        await probeInboxFromPage()
         let data = await MessageNotifier.shared.fetchForPage()
         var js = ""
         if let unread = data.unread {
@@ -152,6 +153,23 @@ final class WebViewStore: NSObject, ObservableObject, WKNavigationDelegate, WKUI
             js += "window.__unreel && window.__unreel.setPresence(\(text));"
         }
         if !js.isEmpty { _ = try? await webView.evaluateJavaScript(js) }
+    }
+
+    /// Asks for the inbox from inside the page itself (exactly as Instagram's site
+    /// would) and records what came back, so we can tell which way works.
+    func probeInboxFromPage() async {
+        let js = """
+        try {
+          const csrf = (document.cookie.match(/csrftoken=([^;]+)/) || [])[1] || '';
+          const r = await fetch('/api/v1/direct_v2/inbox/?limit=1', { credentials: 'include', headers: {
+            'x-ig-app-id': '936619743392459', 'x-requested-with': 'XMLHttpRequest', 'x-csrftoken': csrf,
+            'x-ig-www-claim': sessionStorage.getItem('www-claim-v2') || '0', 'x-asbd-id': '129477' } });
+          const t = await r.text();
+          return r.status + ' ' + t.slice(0, 60).replace(/\\s+/g, ' ');
+        } catch (e) { return 'error ' + e; }
+        """
+        let result = try? await webView.callAsyncJavaScript(js, arguments: [:], in: nil, in: .page)
+        if let text = result as? String { MessageNotifier.shared.pageProbe = text }
     }
 
     /// Reads Instagram's www-claim value the page captured, for background checks.

@@ -201,7 +201,8 @@ final class MessageNotifier: NSObject, ObservableObject, UNUserNotificationCente
               let inbox = json["inbox"] as? [String: Any],
               let threads = inbox["threads"] as? [[String: Any]] else {
             let code = (result.1 as? HTTPURLResponse)?.statusCode ?? 0
-            status = "Instagram refused the check (code \(code), " + Self.time(Date()) + ")"
+            baseStatus = "Refused (" + Self.time(Date()) + "): " + Self.lastReport
+            status = pageProbe.isEmpty ? baseStatus : baseStatus + "\nIn page: " + pageProbe
             return
         }
 
@@ -277,45 +278,80 @@ final class MessageNotifier: NSObject, ObservableObject, UNUserNotificationCente
 
     // MARK: Talking to Instagram
 
-    /// The inbox isn't available at the website's address for requests made outside
-    /// the page (it answers 404), so we try the website first and then the address
-    /// Instagram's own app uses, and remember whichever works.
-    private static var workingEndpoint: Int?   // index into `endpoints`
+    /// Instagram answers these requests differently depending on how they're made,
+    /// and which way works changes over time. We try several known ways, remember
+    /// the one that works, and keep a short report of what each one answered
+    /// (shown in Filters) so a failure can be pinned down.
+    private static var workingVariant: Int?
+    static var lastReport = ""
+    /// What the same request answered from inside the page (see WebViewStore).
+    var pageProbe = "" { didSet { if !status.hasPrefix("Working") { status = baseStatus + "\nIn page: " + pageProbe } } }
+    private var baseStatus = "Not checked yet"
 
-    // The website address (first) answers once we send the www-claim; the app
-    // address is a fallback.
-    private static let endpoints: [(base: String, userAgent: String, appId: String)] = [
-        ("https://www.instagram.com", WebViewStore.safariUA, "936619743392459"),
-        ("https://i.instagram.com", WebViewStore.safariUA, "936619743392459"),
+    private struct Variant {
+        let name: String
+        let base: String
+        let userAgent: String
+        let appId: String
+        let webHeaders: Bool   // the extra headers the website sends with its own requests
+    }
+
+    private static let iosAppUA = "Instagram 360.0.0.30.109 (iPhone15,2; iOS 18_6; en_US; en-US; scale=3.00; 1179x2556; 672535977)"
+
+    private static let variants: [Variant] = [
+        Variant(name: "web", base: "https://www.instagram.com", userAgent: WebViewStore.safariUA, appId: "936619743392459", webHeaders: true),
+        Variant(name: "app", base: "https://i.instagram.com", userAgent: iosAppUA, appId: "124024574287414", webHeaders: false),
+        Variant(name: "web-alt", base: "https://i.instagram.com", userAgent: WebViewStore.safariUA, appId: "936619743392459", webHeaders: true),
     ]
 
     static func instagramGET(_ path: String, cookie: String, csrf: String) async -> (Data, URLResponse)? {
-        let order = workingEndpoint.map { w in [w] + endpoints.indices.filter { $0 != w } } ?? Array(endpoints.indices)
+        let order = workingVariant.map { w in [w] + variants.indices.filter { $0 != w } } ?? Array(variants.indices)
         var last: (Data, URLResponse)?
+        var report: [String] = []
         for i in order {
-            let e = endpoints[i]
-            guard let url = URL(string: e.base + path) else { continue }
+            let v = variants[i]
+            guard let url = URL(string: v.base + path) else { continue }
             var request = URLRequest(url: url)
             request.setValue(cookie, forHTTPHeaderField: "Cookie")
             request.setValue(csrf, forHTTPHeaderField: "X-CSRFToken")
-            request.setValue(e.appId, forHTTPHeaderField: "X-IG-App-ID")
-            request.setValue("XMLHttpRequest", forHTTPHeaderField: "X-Requested-With")
-            request.setValue(e.userAgent, forHTTPHeaderField: "User-Agent")
-            request.setValue("https://www.instagram.com/direct/inbox/", forHTTPHeaderField: "Referer")
-            request.setValue("https://www.instagram.com", forHTTPHeaderField: "Origin")
-            request.setValue(Self.wwwClaim, forHTTPHeaderField: "X-IG-WWW-Claim")
-            request.setValue("1", forHTTPHeaderField: "X-IG-Capabilities")
-            request.setValue("z", forHTTPHeaderField: "X-IG-Connection-Type")
+            request.setValue(v.appId, forHTTPHeaderField: "X-IG-App-ID")
+            request.setValue(v.userAgent, forHTTPHeaderField: "User-Agent")
+            request.setValue("*/*", forHTTPHeaderField: "Accept")
+            if v.webHeaders {
+                request.setValue("XMLHttpRequest", forHTTPHeaderField: "X-Requested-With")
+                request.setValue("https://www.instagram.com/direct/inbox/", forHTTPHeaderField: "Referer")
+                request.setValue("https://www.instagram.com", forHTTPHeaderField: "Origin")
+                request.setValue(Self.wwwClaim, forHTTPHeaderField: "X-IG-WWW-Claim")
+                request.setValue("129477", forHTTPHeaderField: "X-ASBD-ID")
+                request.setValue("same-origin", forHTTPHeaderField: "Sec-Fetch-Site")
+            }
             request.httpShouldHandleCookies = false
-            guard let result = try? await URLSession.shared.data(for: request) else { continue }
+            guard let result = try? await URLSession.shared.data(for: request) else {
+                report.append("\(v.name): no connection")
+                continue
+            }
             last = result
             let code = (result.1 as? HTTPURLResponse)?.statusCode ?? 0
             if code == 200, (try? JSONSerialization.jsonObject(with: result.0)) != nil {
-                workingEndpoint = i
+                workingVariant = i
+                lastReport = "\(v.name): OK"
                 return result
             }
+            report.append("\(v.name): \(code) \(reason(result.0))")
         }
+        lastReport = report.joined(separator: " | ")
         return last
+    }
+
+    /// Instagram's own explanation for a refusal, shortened.
+    private static func reason(_ data: Data) -> String {
+        if let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any] {
+            let message = (json["message"] as? String) ?? (json["error_type"] as? String) ?? ""
+            if !message.isEmpty { return String(message.prefix(60)) }
+        }
+        let text = String(data: data.prefix(200), encoding: .utf8)?
+            .replacingOccurrences(of: "\n", with: " ") ?? ""
+        return text.contains("<html") ? "(web page)" : String(text.prefix(60))
     }
 
     /// Who's online and the unread count, for the page (it can't ask the app
