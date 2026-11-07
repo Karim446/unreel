@@ -8,7 +8,6 @@ struct SettingsView: View {
     var resetCache: () -> Void
     @State private var confirmReset = false
     @ObservedObject private var notifier = MessageNotifier.shared
-    @ObservedObject private var notifier = MessageNotifier.shared
 
     /// Copies the Instagram cookies the relay's bridge asks for, as JSON.
     private func copyRelayLogin() {
@@ -67,21 +66,13 @@ struct SettingsView: View {
                     Text("Peek: long-press a chat in your inbox to read it without sending \"Seen\". Tap \"Mark as read\" in the chat when you're ready.")
                 }
                 Section {
-                    Button("Test Inbox Check") { Task { await notifier.checkOnce() } }
+                    Button("Test Inbox Check") { Task { await notifier.testCheck() } }
                     Text(notifier.status).font(.footnote).foregroundStyle(.secondary).textSelection(.enabled)
                     Button("Copy Login for Relay Server") { copyRelayLogin() }
                 } header: {
                     Text("Notifications (experimental)")
                 } footer: {
                     Text("Test Inbox Check tries one request and shows Instagram's answer. Copy Login copies your Instagram session cookies so the relay server can connect as you. Treat it like a password: paste it only into your own server.")
-                }
-                Section {
-                    Button("Test Inbox Check") { Task { await notifier.testCheck() } }
-                    Text(notifier.status).font(.footnote).foregroundStyle(.secondary).textSelection(.enabled)
-                } header: {
-                    Text("Notifications (testing)")
-                } footer: {
-                    Text("Tries each way of reading your inbox once and shows what Instagram answered. Doesn't send notifications. Open the app and browse for a few seconds first.")
                 }
                 Section {
                     Button("Reset Cache", role: .destructive) { confirmReset = true }
