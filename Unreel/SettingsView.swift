@@ -6,6 +6,7 @@ struct SettingsView: View {
     var openEditProfile: () -> Void
     var resetCache: () -> Void
     @State private var confirmReset = false
+    @ObservedObject private var notifier = MessageNotifier.shared
 
     init(openEditProfile: @escaping () -> Void = {}, resetCache: @escaping () -> Void = {}) {
         self.openEditProfile = openEditProfile
@@ -47,8 +48,12 @@ struct SettingsView: View {
                 }
                 Section {
                     Toggle("Message notifications", isOn: $settings.notifications)
+                    if settings.notifications {
+                        Text(notifier.status).font(.footnote).foregroundStyle(.secondary)
+                        Button("Send Test Notification") { notifier.sendTest() }
+                    }
                 } footer: {
-                    Text("Unreel checks your inbox every 15 seconds while it's in the background and notifies you of new messages. Tapping one opens that chat, and reading a chat here clears its notifications. If you swipe Unreel away in the app switcher, checking stops until you open it again.")
+                    Text("Unreel notifies you of new DMs. It checks your inbox every 15 seconds while running, and iOS wakes it periodically after that. Tapping a notification opens the chat; reading it here clears it. iOS can't deliver these with the app fully closed, so if you force-quit Unreel (swipe it away) notifications pause until you reopen it, and delivery is best-effort, not guaranteed. For a hard guarantee, keep the real Instagram app's notifications on as a backup.")
                 }
                 Section {
                     Button("Reset Cache", role: .destructive) { confirmReset = true }

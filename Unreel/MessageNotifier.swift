@@ -1,4 +1,5 @@
 import AVFoundation
+import BackgroundTasks
 import UIKit
 import UserNotifications
 import WebKit
@@ -16,8 +17,11 @@ import WebKit
 /// memory, checking stops until you open it again. Keep the real Instagram app's
 /// notifications on as a backup if you want to be sure never to miss one.
 @MainActor
-final class MessageNotifier: NSObject, UNUserNotificationCenterDelegate {
+final class MessageNotifier: NSObject, ObservableObject, UNUserNotificationCenterDelegate {
     static let shared = MessageNotifier()
+
+    /// Shown in Filters so you can see whether checking is working.
+    @Published var status = "Not checked yet"
 
     private var timer: Timer?
     private var keepAlive: AVAudioPlayer?
@@ -43,8 +47,80 @@ final class MessageNotifier: NSObject, UNUserNotificationCenterDelegate {
         }
     }
 
+    static let refreshTaskId = "com.yourname.unreel.refresh"
+    static let processingTaskId = "com.yourname.unreel.processing"
+
     func configure() {
         UNUserNotificationCenter.current().delegate = self
+        // These run even if the keep-alive audio is stopped, as long as the app
+        // wasn't force-quit. iOS decides when; they are a backstop, not a guarantee.
+        BGTaskScheduler.shared.register(forTaskWithIdentifier: Self.refreshTaskId, using: nil) { task in
+            Task { @MainActor in await MessageNotifier.shared.runBackgroundTask(task) }
+        }
+        BGTaskScheduler.shared.register(forTaskWithIdentifier: Self.processingTaskId, using: nil) { task in
+            Task { @MainActor in await MessageNotifier.shared.runBackgroundTask(task) }
+        }
+
+        let center = NotificationCenter.default
+        // Other audio (a reel, a call, Siri) can stop the silent loop: start it again.
+        center.addObserver(forName: AVAudioSession.interruptionNotification, object: nil, queue: .main) { _ in
+            MainActor.assumeIsolated { MessageNotifier.shared.ensureRunning() }
+        }
+        // Leaving the app: make sure the loop is playing and queue the backstop checks.
+        center.addObserver(forName: UIApplication.didEnterBackgroundNotification, object: nil, queue: .main) { _ in
+            MainActor.assumeIsolated {
+                MessageNotifier.shared.ensureRunning()
+                MessageNotifier.shared.scheduleBackgroundTasks()
+            }
+        }
+    }
+
+    /// Make sure the silent loop is playing and the timer is running.
+    func ensureRunning() {
+        guard enabled else { return }
+        if keepAlive?.isPlaying != true {
+            keepAlive?.stop()
+            keepAlive = nil
+            startKeepAlive()
+        }
+        if timer == nil { startTimer() }
+    }
+
+    /// Sends a notification in 5 seconds, so you can leave the app and see it arrive.
+    func sendTest() {
+        UNUserNotificationCenter.current().requestAuthorization(options: [.alert, .sound, .badge]) { granted, _ in
+            Task { @MainActor in
+                guard granted else {
+                    MessageNotifier.shared.status = "Notifications are off for Unreel in iPhone Settings"
+                    return
+                }
+                let content = UNMutableNotificationContent()
+                content.title = "Unreel"
+                content.body = "Test notification: notifications are working."
+                content.sound = .default
+                let trigger = UNTimeIntervalNotificationTrigger(timeInterval: 5, repeats: false)
+                try? await UNUserNotificationCenter.current().add(UNNotificationRequest(identifier: "unreel-test", content: content, trigger: trigger))
+            }
+        }
+    }
+
+    func scheduleBackgroundTasks() {
+        guard enabled else { return }
+        let refresh = BGAppRefreshTaskRequest(identifier: Self.refreshTaskId)
+        refresh.earliestBeginDate = Date(timeIntervalSinceNow: 60)
+        try? BGTaskScheduler.shared.submit(refresh)
+        let processing = BGProcessingTaskRequest(identifier: Self.processingTaskId)
+        processing.requiresNetworkConnectivity = true
+        processing.earliestBeginDate = Date(timeIntervalSinceNow: 300)
+        try? BGTaskScheduler.shared.submit(processing)
+    }
+
+    private func runBackgroundTask(_ task: BGTask) async {
+        scheduleBackgroundTasks()   // always re-schedule the next one
+        let work = Task { await checkInbox() }
+        task.expirationHandler = { work.cancel() }
+        await work.value
+        task.setTaskCompleted(success: true)
     }
 
     private func startTimer() {
@@ -97,7 +173,11 @@ final class MessageNotifier: NSObject, UNUserNotificationCenterDelegate {
 
         let cookies = await WKWebsiteDataStore.default().httpCookieStore.allCookies()
             .filter { $0.domain.contains("instagram.com") }
-        guard let csrf = cookies.first(where: { $0.name == "csrftoken" })?.value, !cookies.isEmpty else { return }
+        guard let csrf = cookies.first(where: { $0.name == "csrftoken" })?.value,
+              cookies.contains(where: { $0.name == "sessionid" }) else {
+            status = "Not logged in to Instagram in Unreel"
+            return
+        }
 
         var request = URLRequest(url: URL(string: "https://www.instagram.com/api/v1/direct_v2/inbox/?limit=20&persistentBadging=true")!)
         request.setValue(cookies.map { "\($0.name)=\($0.value)" }.joined(separator: "; "), forHTTPHeaderField: "Cookie")
@@ -108,10 +188,17 @@ final class MessageNotifier: NSObject, UNUserNotificationCenterDelegate {
         request.setValue("https://www.instagram.com/direct/inbox/", forHTTPHeaderField: "Referer")
         request.httpShouldHandleCookies = false
 
-        guard let result = try? await URLSession.shared.data(for: request),
-              let json = try? JSONSerialization.jsonObject(with: result.0) as? [String: Any],
+        guard let result = try? await URLSession.shared.data(for: request) else {
+            status = "Couldn't reach Instagram (" + Self.time(Date()) + ")"
+            return
+        }
+        guard let json = try? JSONSerialization.jsonObject(with: result.0) as? [String: Any],
               let inbox = json["inbox"] as? [String: Any],
-              let threads = inbox["threads"] as? [[String: Any]] else { return }
+              let threads = inbox["threads"] as? [[String: Any]] else {
+            let code = (result.1 as? HTTPURLResponse)?.statusCode ?? 0
+            status = "Instagram refused the check (code \(code), " + Self.time(Date()) + ")"
+            return
+        }
 
         let viewerId = Self.string((json["viewer"] as? [String: Any])?["pk"])
         let lastSeen = defaults.object(forKey: lastSeenKey) as? Int64
@@ -150,6 +237,8 @@ final class MessageNotifier: NSObject, UNUserNotificationCenterDelegate {
         defaults.set(newest, forKey: lastSeenKey)
         if let count = inbox["unseen_count"] as? Int { unread = count }
         setAppBadge(unread)
+        let running = keepAlive?.isPlaying == true ? "running in background" : "background mode NOT running"
+        status = "Working · \(unread) unread · checked " + Self.time(Date()) + " · " + running
     }
 
     private static func describe(_ item: [String: Any]) -> String {
@@ -164,6 +253,12 @@ final class MessageNotifier: NSObject, UNUserNotificationCenterDelegate {
         case "story_share", "reel_share": return "Replied to a story"
         default: return "Sent a message"
         }
+    }
+
+    private static func time(_ date: Date) -> String {
+        let f = DateFormatter()
+        f.timeStyle = .medium
+        return f.string(from: date)
     }
 
     private static func string(_ value: Any?) -> String? {

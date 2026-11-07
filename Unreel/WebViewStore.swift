@@ -166,6 +166,10 @@ final class WebViewStore: NSObject, ObservableObject, WKNavigationDelegate, WKUI
     func open(_ url: URL) {
         let target: String
         switch url.host?.lowercased() {
+        case "thread", "chat":
+            // unreel://thread/<id> opens that chat (used by notifications from elsewhere).
+            let id = url.pathComponents.filter { $0 != "/" }.first ?? ""
+            target = id.isEmpty ? "direct/inbox/" : "direct/t/\(id)/"
         case "inbox", "direct", "dm": target = "direct/inbox/"
         default: target = ""
         }

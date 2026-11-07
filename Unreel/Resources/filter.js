@@ -884,7 +884,9 @@
     // Like the app: no tab bar over a sheet (a note, comments, share menu) or
     // while the keyboard is up.
     const active = document.activeElement;
-    const typing = active && active.matches && active.matches('input, textarea, [contenteditable="true"]');
+    const typing = (active && active.matches && active.matches('input, textarea, [contenteditable="true"]'))
+      || location.pathname.startsWith('/explore/search')   // search results page
+      || !!document.querySelector('input[placeholder^="Search" i]:focus, input[type="search"]:focus');
     const sheetOpen = [...document.querySelectorAll('[role="dialog"]')].some((d) => {
       const h = d.getBoundingClientRect().height;
       return h > 0 && h < window.innerHeight - 10;   // a sheet, not a full page
@@ -892,6 +894,7 @@
     // A sheet (create menu, note, comments) slides over our bar instead of the bar
     // being swapped for Instagram's own (which changed the spacing).
     document.documentElement.classList.toggle('unreel-under-sheet', sheetOpen);
+    document.documentElement.classList.toggle('unreel-typing', !!typing);
     if (typing) {
       document.documentElement.classList.remove('unreel-tabbar-on', 'unreel-has-tabbar');
       if (bar) bar.remove();
@@ -1263,9 +1266,35 @@
         const key = postKey(post);
         if (key) { keptPosts.delete(key); hiddenPosts.add(key); }
       }
-      if (hide) {
-        const slot = feedSlot(post);
-        if (slot.style.display !== 'none') slot.style.display = 'none';
+      if (hide) collapsePost(post);
+    }
+  }
+
+  // Hide a post AND remove the vertical space Instagram reserved for it, so the
+  // feed has no tall blank gaps to jump through. We zero the height on the post,
+  // its slot, and any ancestor up to the feed that is taller than the slot only
+  // because of this post.
+  function collapsePost(post) {
+    if (post.__unreelCollapsed) return;
+    post.__unreelCollapsed = true;
+    const kill = (el) => {
+      el.style.setProperty('display', 'none', 'important');
+      el.style.setProperty('height', '0', 'important');
+      el.style.setProperty('min-height', '0', 'important');
+      el.style.setProperty('margin', '0', 'important');
+      el.style.setProperty('padding', '0', 'important');
+    };
+    const slot = feedSlot(post);
+    kill(post);
+    if (slot !== post) kill(slot);
+    // A virtualized feed often wraps each post in a fixed-height placeholder.
+    let el = slot.parentElement;
+    for (let i = 0; el && el !== document.body && i < 4; el = el.parentElement, i++) {
+      if (el.querySelectorAll('article').length > 1) break;   // holds other posts: stop
+      const style = getComputedStyle(el);
+      if (style.position === 'absolute' || parseFloat(style.minHeight) > 0 || el.style.height) {
+        el.style.setProperty('height', '0', 'important');
+        el.style.setProperty('min-height', '0', 'important');
       }
     }
   }
@@ -1299,11 +1328,22 @@
       if (el === document.documentElement || el === document.body) return false;
       if (/^(IMG|VIDEO|SVG|CANVAS|PICTURE)$/i.test(el.tagName)) return true;
       for (const n of el.childNodes) if (n.nodeType === 3 && n.textContent.trim()) return true;
+      // A post that's still loading shows as a grey/colored box: that's content too.
+      const cs = getComputedStyle(el);
+      if ((cs.backgroundImage && cs.backgroundImage !== 'none') ||
+          (!isTransparent(cs.backgroundColor) && cs.backgroundColor !== getComputedStyle(document.body).backgroundColor &&
+           el.getBoundingClientRect().width > window.innerWidth * 0.4)) return true;
     }
     return false;
   }
 
   function screenHasContent() {
+    // Any visible post on screen counts, even before its picture has loaded.
+    for (const post of document.querySelectorAll('article')) {
+      if (post.__unreelHide) continue;
+      const r = post.getBoundingClientRect();
+      if (r.height > 0 && r.bottom > window.innerHeight * 0.15 && r.top < window.innerHeight * 0.85) return true;
+    }
     const x = window.innerWidth / 2;
     return [0.25, 0.4, 0.55, 0.7].some((f) => hasContentAt(x, window.innerHeight * f) ||
       hasContentAt(window.innerWidth * 0.2, window.innerHeight * f));
@@ -1363,12 +1403,31 @@
     requestAnimationFrame(hop);
   }
 
+  // Only look once scrolling has come to rest and your finger is off the screen:
+  // moving the page while you're swiping or while it's still gliding is what made
+  // it feel janky and jump back.
   let wallTimer = null;
+  let fingerDown = false;
+  window.addEventListener('touchstart', () => { fingerDown = true; }, { capture: true, passive: true });
+  window.addEventListener('touchend', () => { fingerDown = false; }, { capture: true, passive: true });
+  window.addEventListener('touchcancel', () => { fingerDown = false; }, { capture: true, passive: true });
+
+  function scheduleWallCheck() {
+    clearTimeout(wallTimer);
+    wallTimer = setTimeout(() => {
+      if (fingerDown) return scheduleWallCheck();
+      // Hold the wall immediately; everything else needs the screen to stay empty.
+      if (wallTop !== null || screenHasContent()) return checkForWall();
+      setTimeout(() => { if (!fingerDown && !screenHasContent()) checkForWall(); else if (screenHasContent()) checkForWall(); }, 350);
+    }, 180);
+  }
+
   document.addEventListener('scroll', (e) => {
-    if (location.pathname !== '/') return;
+    if (location.pathname !== '/' || skipping) return;
     feedScroller = scrollerOf(e.target);
-    if (wallTimer) return;
-    wallTimer = setTimeout(() => { wallTimer = null; checkForWall(); }, 80);
+    // Past the wall: stop right away, even mid-swipe.
+    if (wallTop !== null && feedScroller.scrollTop > wallTop) { feedScroller.scrollTop = wallTop; showCaughtUp(true); return; }
+    scheduleWallCheck();
   }, { capture: true, passive: true });
 
   // Leaving the feed resets the wall, so new posts can show next time.
@@ -1616,22 +1675,30 @@
   const SEEN_TEXT = /^Seen( by .+)?( \d+\s?[smhdwy]\w* ago| just now| ago)?$/i;
   function tidySeenLabel() {
     if (!location.pathname.startsWith('/direct/t/')) return;
+    const W = window.innerWidth;
     for (const el of document.querySelectorAll('span, div')) {
       if (el.childElementCount || !SEEN_TEXT.test(el.textContent.trim())) continue;
-      const r = el.getBoundingClientRect();
-      if (!r.height) continue;
-      // What's just above the label: your bubbles sit on the right, theirs on the left.
-      const y = r.top - 24;
-      const mine = document.elementsFromPoint(window.innerWidth * 0.88, y)
-        .some((x) => x !== el && x.textContent.trim() && x.getBoundingClientRect().right > window.innerWidth * 0.8 &&
-                     x.getBoundingClientRect().width < window.innerWidth * 0.9);
-      const theirs = document.elementsFromPoint(window.innerWidth * 0.25, y)
-        .some((x) => x.textContent.trim() && x.getBoundingClientRect().left < window.innerWidth * 0.4 &&
-                     x.getBoundingClientRect().width < window.innerWidth * 0.9);
-      const hide = theirs && !mine;
-      el.style.visibility = hide ? 'hidden' : '';
+      const label = el.getBoundingClientRect();
+      if (!label.height) continue;
+      // The message right above the label: the nearest text bubble, ignoring
+      // centered lines (times, "New messages") and anything full-width.
+      let nearest = null;
+      for (const t of document.querySelectorAll('span, div')) {
+        if (t === el || t.childElementCount) continue;
+        const text = t.textContent.trim();
+        if (!text || SEEN_TEXT.test(text)) continue;
+        const r = t.getBoundingClientRect();
+        if (!r.height || r.bottom > label.top + 2 || r.bottom < label.top - 260) continue;
+        const centered = Math.abs((r.left + r.right) / 2 - W / 2) < W * 0.08 && r.width < W * 0.6;
+        if (centered || r.width > W * 0.85) continue;
+        if (!nearest || r.bottom > nearest.bottom) nearest = r;
+      }
+      // Yours sit on the right; theirs on the left.
+      const theirs = nearest && (nearest.left + nearest.right) / 2 < W / 2;
+      el.style.display = theirs ? 'none' : '';
     }
   }
+
 
   // ---- Unread count on the Messages tab -----------------------------------------
   // The site's own badge often lags. We ask Instagram for the unread count directly
@@ -1667,6 +1734,71 @@
   }
   setInterval(() => refreshUnread(false), 5000);
 
+  // ---- Green "online" dots on people in the inbox ---------------------------------
+  // The app shows a green dot on anyone active, including people in the notes row.
+  // The site leaves many out. We ask Instagram who's active (the same request the
+  // app makes, every 30 seconds) and add the dot to their photo wherever it's missing.
+  let onlineUsers = {};
+  let lastPresenceFetch = 0;
+  async function refreshPresence() {
+    if (Date.now() - lastPresenceFetch < 30000) return;
+    lastPresenceFetch = Date.now();
+    try {
+      const res = await realFetch('/api/v1/direct_v2/get_presence/', {
+        credentials: 'include',
+        headers: { 'x-ig-app-id': '936619743392459', 'x-requested-with': 'XMLHttpRequest' },
+      });
+      const data = await res.json();
+      onlineUsers = (data && data.user_presence) || {};
+    } catch (_) {}
+  }
+
+  // The person a photo belongs to, from the page's own data.
+  function userPkFor(el) {
+    let fiber = reactFiber(el);
+    for (let i = 0; fiber && i < 15; i++, fiber = fiber.return) {
+      const props = fiber.memoizedProps;
+      if (!props || typeof props !== 'object') continue;
+      for (const v of [props, props.user, props.participant, props.owner, props.note && props.note.user]) {
+        if (v && typeof v === 'object' && v.username && /^\d{5,}$/.test(String(v.pk || v.id || v.pk_id || ''))) {
+          return String(v.pk || v.id || v.pk_id);
+        }
+      }
+    }
+    return null;
+  }
+
+  const hasGreenDot = (box) => [...box.querySelectorAll('*')].some((d) => {
+    const r = d.getBoundingClientRect();
+    if (r.width > 24 || r.width < 6) return false;
+    const [cr, cg, cb] = (getComputedStyle(d).backgroundColor.match(/[\d.]+/g) || [0, 0, 0]).map(Number);
+    return cg > 150 && cr < 140 && cb < 140;
+  });
+
+  function updateOnlineDots() {
+    if (!onInbox()) return;
+    refreshPresence();
+    for (const img of document.querySelectorAll('img')) {
+      const r = img.getBoundingClientRect();
+      if (r.width < 36 || r.width > 100 || Math.abs(r.width - r.height) > 4) continue;   // round profile photos only
+      const box = img.parentElement;
+      if (!box) continue;
+      const pk = img.__unreelPk !== undefined ? img.__unreelPk : (img.__unreelPk = userPkFor(img));
+      const active = pk && onlineUsers[pk] && onlineUsers[pk].is_active;
+      let dot = box.querySelector(':scope > .unreel-online');
+      if (active && !dot && !hasGreenDot(box)) {
+        if (getComputedStyle(box).position === 'static') box.style.position = 'relative';
+        dot = document.createElement('span');
+        dot.className = 'unreel-online';
+        const size = Math.round(r.width * 0.26);
+        dot.style.width = dot.style.height = `${size}px`;
+        box.appendChild(dot);
+      } else if (!active && dot) {
+        dot.remove();
+      }
+    }
+  }
+
   // ---- Actions the app can trigger (Home Screen quick actions) ----------------
 
   window.__unreel = {
@@ -1692,6 +1824,8 @@
     // Our tab bar: Instagram's icons in equal-width columns, pinned to the bottom.
     '#unreel-tabbar { position: fixed; left: 0; right: 0; bottom: 0; z-index: 2147483000; display: flex; align-items: stretch; }',
     '.unreel-under-sheet #unreel-tabbar { z-index: 0; }',
+    // While typing, neither bar shows (like the app); Instagram's would float over the keyboard.
+    '.unreel-typing [data-unreel-sitenav] { display: none !important; }',
     '.unreel-tab { flex: 1 1 0; display: flex; align-items: center; justify-content: center; color: inherit; text-decoration: none; }',
     '.unreel-tab > * { pointer-events: none; }',
     '.unreel-tab-icon { position: relative; display: inline-flex; align-items: center; justify-content: center; }',
@@ -1701,6 +1835,9 @@
     // Instagram's own bar stays laid out (so it keeps updating) but invisible.
     '.unreel-tabbar-on [data-unreel-sitenav] { opacity: 0 !important; pointer-events: none !important; }',
     '.unreel-has-tabbar body { padding-bottom: var(--unreel-tabbar-h, 50px) !important; }',
+    // Online dot on notes/stories avatars.
+    // Online dot on profile photos in the inbox.
+    '.unreel-online { position: absolute; right: 2%; bottom: 2%; border-radius: 50%; background: #3ec95a; border: 3px solid var(--unreel-page-bg, #fff); box-sizing: border-box; pointer-events: none; }',
     // Peek banner and toast.
     '#unreel-peek { position: fixed; left: 50%; transform: translateX(-50%); z-index: 2147483001; display: flex; align-items: center; gap: 10px; padding: 7px 8px 7px 14px; border-radius: 999px; font-size: 13px; font-weight: 600; color: #fff; background: rgba(40,40,46,0.92); box-shadow: 0 4px 16px rgba(0,0,0,0.25); white-space: nowrap; }',
     '#unreel-peek button { border: 0; border-radius: 999px; padding: 5px 10px; font: inherit; font-size: 12px; color: #000; background: #fff; }',
@@ -1738,6 +1875,7 @@
   // Paint <html> with Instagram's background so any area that isn't drawn yet
   // (page changes, keyboard closing) shows that color instead of a white flash.
   function paintBackground(color) {
+    if (color) document.documentElement.style.setProperty('--unreel-page-bg', color);
     // A color saved in the other mode (e.g. dark, now in light) would be wrong.
     if (color && isDarkColor(color) !== prefersDark()) return;
     if (color) document.documentElement.style.backgroundColor = color;
@@ -1786,7 +1924,6 @@
     updateHeader();
     updateInboxStatus();
     updatePeek();
-    tidySeenLabel();
 
 
     // Fallback in case a navigation slipped past the history hooks.
@@ -1801,6 +1938,8 @@
     updateViewerSearch();
     updateStories();
     sharpenPreviews();
+    tidySeenLabel();
+    updateOnlineDots();
 
     const video = document.querySelector('video') ? viewerVideo() : null;
     if (video) {
