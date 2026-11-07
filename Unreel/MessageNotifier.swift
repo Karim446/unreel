@@ -47,7 +47,14 @@ final class MessageNotifier: NSObject, ObservableObject, UNUserNotificationCente
         guard count >= 0 else { return }
         let previous = previousLiveUnread
         previousLiveUnread = count
-        guard let previous, count > previous else { return }
+        guard let previous else {
+            status = "DM observer connected: initial unread count \(count); waiting for an increase"
+            return
+        }
+        guard count > previous else {
+            status = "DM observer: unread count \(previous) -> \(count); no increase"
+            return
+        }
         guard defaults.object(forKey: "notifications") as? Bool ?? true else { return }
 
         status = "Unread badge increased: \(previous) -> \(count)"

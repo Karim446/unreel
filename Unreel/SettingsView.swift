@@ -67,6 +67,7 @@ struct SettingsView: View {
                 }
                 Section {
                     Toggle("Alert on new unread DMs while app is running", isOn: $settings.notifications)
+                    Button("Test Local Notification") { notifier.sendTest() }
                     Button("Test Inbox Check") { Task { await notifier.testCheck() } }
                     Text(notifier.status).font(.footnote).foregroundStyle(.secondary).textSelection(.enabled)
                     Button("Copy Login for Relay Server") { copyRelayLogin() }
