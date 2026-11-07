@@ -39,6 +39,44 @@ final class MessageNotifier: NSObject, ObservableObject, UNUserNotificationCente
 
     func updateClaim(_ value: String) { defaults.set(value, forKey: "notifier.wwwClaim") }
 
+    // Live counts come from Unreel's existing Inbox badge observer.
+    // They represent unread conversations, not individual DM events.
+    private var previousLiveUnread: Int?
+
+    func observeLiveUnreadCount(_ count: Int) {
+        guard count >= 0 else { return }
+        let previous = previousLiveUnread
+        previousLiveUnread = count
+        guard let previous, count > previous else { return }
+        guard defaults.object(forKey: "notifications") as? Bool ?? true else { return }
+
+        status = "Unread badge increased: \(previous) -> \(count)"
+        Task {
+            let center = UNUserNotificationCenter.current()
+            do {
+                let permitted = try await center.requestAuthorization(options: [.alert, .sound, .badge])
+                guard permitted else {
+                    status = "Enable Unreel notifications in iPhone Settings"
+                    return
+                }
+                let content = UNMutableNotificationContent()
+                content.title = "Instagram"
+                content.body = "You have new unread DMs."
+                content.sound = .default
+                content.userInfo = ["openInbox": true]
+                let request = UNNotificationRequest(
+                    identifier: "unreel-unread-\(UUID().uuidString)",
+                    content: content,
+                    trigger: nil
+                )
+                try await center.add(request)
+                status = "Local DM alert queued: \(previous) -> \(count)"
+            } catch {
+                status = "DM alert error: " + error.localizedDescription
+            }
+        }
+    }
+
     // MARK: Turning it on and off
 
     func setEnabled(_ on: Bool) {
@@ -448,8 +486,13 @@ final class MessageNotifier: NSObject, ObservableObject, UNUserNotificationCente
                                             didReceive response: UNNotificationResponse,
                                             withCompletionHandler completionHandler: @escaping () -> Void) {
         let threadId = response.notification.request.content.userInfo["threadId"] as? String
+        let openInbox = response.notification.request.content.userInfo["openInbox"] as? Bool ?? false
         Task { @MainActor in
-            if let threadId { AppRouter.shared.pendingThread = threadId }
+            if let threadId {
+                AppRouter.shared.pendingThread = threadId
+            } else if openInbox {
+                AppRouter.shared.pendingAction = .messages
+            }
             completionHandler()
         }
     }
@@ -457,9 +500,9 @@ final class MessageNotifier: NSObject, ObservableObject, UNUserNotificationCente
     nonisolated func userNotificationCenter(_ center: UNUserNotificationCenter,
                                             willPresent notification: UNNotification,
                                             withCompletionHandler completionHandler: @escaping (UNNotificationPresentationOptions) -> Void) {
-        // In the app you're already looking at Instagram, so message notifications
-        // stay quiet here; the test one always shows so you can see it works.
-        let isTest = notification.request.identifier == "unreel-test"
-        completionHandler(isTest ? [.banner, .list, .sound] : [])
+        // Display experimental unread alerts while the app is open.
+        let show = notification.request.identifier == "unreel-test" ||
+                   notification.request.identifier.hasPrefix("unreel-unread-")
+        completionHandler(show ? [.banner, .list, .sound] : [])
     }
 }

@@ -292,6 +292,7 @@ final class WebViewStore: NSObject, ObservableObject, WKNavigationDelegate, WKUI
         }
         if message.name == "unread", let count = message.body as? Int {
             MessageNotifier.shared.setAppBadge(count)
+            MessageNotifier.shared.observeLiveUnreadCount(count)
             return
         }
         if message.name == "route", let newPath = message.body as? String {

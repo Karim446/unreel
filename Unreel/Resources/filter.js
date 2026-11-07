@@ -1747,6 +1747,8 @@
   // (the same lightweight request the app uses) every 20 seconds and whenever you
   // change pages, and draw the badge ourselves.
   let unreadCount = 0;
+  // Send the first successful count, even zero, so Swift can establish a baseline.
+  let hasUnreadBaseline = false;
   let lastBadgeFetch = 0;
   async function refreshUnread(force) {
     if (!force && Date.now() - lastBadgeFetch < 20000) return;
@@ -1767,11 +1769,12 @@
         else if (inbox && inbox.threads) count = inbox.threads.filter((t) => t.read_state === 1).length;
       } catch (_) {}
     }
-    if (count !== null && count !== unreadCount) {
+    if (count !== null && (!hasUnreadBaseline || count !== unreadCount)) {
+      hasUnreadBaseline = true;
       unreadCount = count;
       lastSig = '';
       updateTabBar();
-      window.webkit?.messageHandlers?.unread?.postMessage(count);   // app icon badge
+      window.webkit?.messageHandlers?.unread?.postMessage(count);   // icon badge and DM notification observer
     }
   }
   setInterval(() => refreshUnread(false), 5000);

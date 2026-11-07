@@ -66,13 +66,14 @@ struct SettingsView: View {
                     Text("Peek: long-press a chat in your inbox to read it without sending \"Seen\". Tap \"Mark as read\" in the chat when you're ready.")
                 }
                 Section {
+                    Toggle("Alert on new unread DMs while app is running", isOn: $settings.notifications)
                     Button("Test Inbox Check") { Task { await notifier.testCheck() } }
                     Text(notifier.status).font(.footnote).foregroundStyle(.secondary).textSelection(.enabled)
                     Button("Copy Login for Relay Server") { copyRelayLogin() }
                 } header: {
                     Text("Notifications (experimental)")
                 } footer: {
-                    Text("Test Inbox Check tries one request and shows Instagram's answer. Copy Login copies your Instagram session cookies so the relay server can connect as you. Treat it like a password: paste it only into your own server.")
+                    Text("Unread alerts reuse the Inbox badge count and cannot reliably run while Unreel is closed. Test Inbox Check still probes the old failing inbox endpoint. Copy Login copies your Instagram session cookies so the relay server can connect as you. Treat it like a password: paste it only into your own server.")
                 }
                 Section {
                     Button("Reset Cache", role: .destructive) { confirmReset = true }
