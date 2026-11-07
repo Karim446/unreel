@@ -30,7 +30,8 @@ final class MessageNotifier: NSObject, ObservableObject, UNUserNotificationCente
 
     private let defaults = UserDefaults.standard
     private let lastSeenKey = "notifier.lastItemTimestamp"
-    private var wwwClaim: String { defaults.string(forKey: "notifier.wwwClaim") ?? "0" }
+    // Static: it's read inside the static request helper below.
+    private static var wwwClaim: String { UserDefaults.standard.string(forKey: "notifier.wwwClaim") ?? "0" }
 
     func updateClaim(_ value: String) { defaults.set(value, forKey: "notifier.wwwClaim") }
 
@@ -302,7 +303,7 @@ final class MessageNotifier: NSObject, ObservableObject, UNUserNotificationCente
             request.setValue(e.userAgent, forHTTPHeaderField: "User-Agent")
             request.setValue("https://www.instagram.com/direct/inbox/", forHTTPHeaderField: "Referer")
             request.setValue("https://www.instagram.com", forHTTPHeaderField: "Origin")
-            request.setValue(wwwClaim, forHTTPHeaderField: "X-IG-WWW-Claim")
+            request.setValue(Self.wwwClaim, forHTTPHeaderField: "X-IG-WWW-Claim")
             request.setValue("1", forHTTPHeaderField: "X-IG-Capabilities")
             request.setValue("z", forHTTPHeaderField: "X-IG-Connection-Type")
             request.httpShouldHandleCookies = false
