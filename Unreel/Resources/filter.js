@@ -72,14 +72,20 @@
 
   const realFetch = window.fetch;
   window.fetch = function (input, init) {
-    const out = realFetch.apply(this, arguments);
-    if (out && out.then) out.then((res) => { try { rememberClaim(res.headers.get('x-ig-set-www-claim')); } catch (_) {} }).catch(() => {});
     const url = typeof input === 'string' ? input : input && input.url;
     if (shouldHold(url, init && init.body)) {
       heldBack++;
       return Promise.resolve(new Response('{"status":"ok"}', { status: 200, headers: { 'content-type': 'application/json' } }));
     }
-    return realFetch.apply(this, arguments);
+    // Send exactly ONCE. The old wrapper started a request before checking
+    // shouldHold(), and sent a second copy for every allowed request.
+    const out = realFetch.apply(this, arguments);
+    if (out && typeof out.then === 'function') {
+      out.then((res) => {
+        try { rememberClaim(res.headers.get('x-ig-set-www-claim')); } catch (_) {}
+      }).catch(() => {});
+    }
+    return out;
   };
 
   const realOpen = XMLHttpRequest.prototype.open;

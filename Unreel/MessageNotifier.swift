@@ -356,10 +356,23 @@ final class MessageNotifier: NSObject, ObservableObject, UNUserNotificationCente
             }
             last = result
             let code = (result.1 as? HTTPURLResponse)?.statusCode ?? 0
-            if code == 200, (try? JSONSerialization.jsonObject(with: result.0)) != nil {
-                workingVariant = i
-                lastReport = "\(v.name): OK"
-                return result
+            if code == 200,
+               let json = (try? JSONSerialization.jsonObject(with: result.0)) as? [String: Any] {
+                // A 200 JSON error body is not a successful inbox response.
+                // Other callers of this helper (badge/presence) have different schemas.
+                let valid: Bool
+                if path.contains("/direct_v2/inbox/") {
+                    valid = ((json["inbox"] as? [String: Any])?["threads"] as? [[String: Any]]) != nil
+                } else {
+                    valid = true
+                }
+                if valid {
+                    workingVariant = i
+                    lastReport = "\(v.name): OK"
+                    return result
+                }
+                report.append("\(v.name): 200 but no inbox.threads")
+                continue
             }
             report.append("\(v.name): \(code) \(reason(result.0))")
         }
