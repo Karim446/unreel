@@ -1,4 +1,5 @@
 import SwiftUI
+import WebKit
 
 struct SettingsView: View {
     @EnvironmentObject private var settings: FilterSettings
@@ -7,6 +8,25 @@ struct SettingsView: View {
     var resetCache: () -> Void
     @State private var confirmReset = false
     @ObservedObject private var notifier = MessageNotifier.shared
+    @ObservedObject private var notifier = MessageNotifier.shared
+
+    /// Copies the Instagram cookies the relay's bridge asks for, as JSON.
+    private func copyRelayLogin() {
+        WKWebsiteDataStore.default().httpCookieStore.getAllCookies { cookies in
+            let wanted = ["sessionid", "csrftoken", "ds_user_id", "mid", "ig_did", "rur", "datr"]
+            var values: [String: String] = [:]
+            for c in cookies where c.domain.contains("instagram.com") && wanted.contains(c.name) {
+                values[c.name] = c.value
+            }
+            let data = (try? JSONSerialization.data(withJSONObject: values, options: [.sortedKeys])) ?? Data()
+            UIPasteboard.general.string = String(data: data, encoding: .utf8)
+            Task { @MainActor in
+                MessageNotifier.shared.status = values["sessionid"] == nil
+                    ? "Not logged in: open Instagram in Unreel first."
+                    : "Copied \(values.count) cookies. Paste them only into your own relay."
+            }
+        }
+    }
 
     init(openEditProfile: @escaping () -> Void = {}, resetCache: @escaping () -> Void = {}) {
         self.openEditProfile = openEditProfile
@@ -47,13 +67,21 @@ struct SettingsView: View {
                     Text("Peek: long-press a chat in your inbox to read it without sending \"Seen\". Tap \"Mark as read\" in the chat when you're ready.")
                 }
                 Section {
-                    Toggle("Message notifications", isOn: $settings.notifications)
-                    if settings.notifications {
-                        Text(notifier.status).font(.footnote).foregroundStyle(.secondary)
-                        Button("Send Test Notification") { notifier.sendTest() }
-                    }
+                    Button("Test Inbox Check") { Task { await notifier.checkOnce() } }
+                    Text(notifier.status).font(.footnote).foregroundStyle(.secondary).textSelection(.enabled)
+                    Button("Copy Login for Relay Server") { copyRelayLogin() }
+                } header: {
+                    Text("Notifications (experimental)")
                 } footer: {
-                    Text("Unreel notifies you of new DMs. It checks your inbox every 15 seconds while running, and iOS wakes it periodically after that. Tapping a notification opens the chat; reading it here clears it. iOS can't deliver these with the app fully closed, so if you force-quit Unreel (swipe it away) notifications pause until you reopen it, and delivery is best-effort, not guaranteed. For a hard guarantee, keep the real Instagram app's notifications on as a backup.")
+                    Text("Test Inbox Check tries one request and shows Instagram's answer. Copy Login copies your Instagram session cookies so the relay server can connect as you. Treat it like a password: paste it only into your own server.")
+                }
+                Section {
+                    Button("Test Inbox Check") { Task { await notifier.testCheck() } }
+                    Text(notifier.status).font(.footnote).foregroundStyle(.secondary).textSelection(.enabled)
+                } header: {
+                    Text("Notifications (testing)")
+                } footer: {
+                    Text("Tries each way of reading your inbox once and shows what Instagram answered. Doesn't send notifications. Open the app and browse for a few seconds first.")
                 }
                 Section {
                     Button("Reset Cache", role: .destructive) { confirmReset = true }

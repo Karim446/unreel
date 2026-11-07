@@ -83,15 +83,9 @@ final class WebViewStore: NSObject, ObservableObject, WKNavigationDelegate, WKUI
 
         // Unread count and who's online, fetched by the app (the page itself can't
         // reach the address that answers these) and handed to the page.
-        pageDataTimer = Timer.scheduledTimer(withTimeInterval: 20, repeats: true) { _ in
-            Task { @MainActor in await WebViewStore.current?.pushPageData() }
-        }
+        // (Disabled: Instagram refuses these requests from outside its own app,
+        // answering "Prompt has contribution". Kept for reference.)
         WebViewStore.current = self
-        Task { @MainActor in
-            try? await Task.sleep(nanoseconds: 3_000_000_000)
-            _ = await self.readClaim()
-            await self.pushPageData()
-        }
 
         // Never leave the screen blank if the first load stalls.
         DispatchQueue.main.asyncAfter(deadline: .now() + 8) { [weak self] in self?.hasLoaded = true }

@@ -1262,34 +1262,54 @@
     return undefined;   // not loaded yet: decide on a later pass
   }
 
+  // Hiding a post that's on screen (or above it) makes everything below jump,
+  // which is the flicker you saw: a post you were looking at vanished once its
+  // video loaded, and the page snapped to the next one. So posts are only ever
+  // hidden while they're still below the screen. Once a post has been on screen
+  // it stays, even if it later turns out to be a Reel.
+  function safeToHide(post) {
+    const r = feedSlot(post).getBoundingClientRect();
+    return r.height === 0 || r.top >= window.innerHeight;
+  }
+
+  function keep(post) {
+    post.__unreelHide = false;
+    post.__unreelRechecked = true;
+    const key = postKey(post);
+    if (key) { hiddenPosts.delete(key); keptPosts.add(key); }
+  }
+
   function updateFeed() {
     const posts = [...document.querySelectorAll('article')];
     if (!posts.length) return;
     for (const post of posts) {
+      if (post.__unreelCollapsed) continue;
       let hide = post.__unreelHide;
       if (hide === undefined) {
+        const known = postKey(post);
+        const alreadyHidden = known && hiddenPosts.has(known);   // Instagram re-drew a post we'd hidden: keep it hidden
         hide = decidePost(post);
+        if (hide === true && !alreadyHidden && !safeToHide(post)) { keep(post); continue; }
         if (hide !== undefined) {
           post.__unreelHide = hide;
           const key = postKey(post);
           if (key) (hide ? hiddenPosts : keptPosts).add(key);
         }
       }
-      // A kept post can still turn out to be a Reel once its video loads (once only).
-      if (hide === false && cfg.blockFeedReels && post.querySelector('video') && !post.__unreelRechecked) {
+      // A kept post can still turn out to be a Reel once its video loads, but only
+      // hide it if you haven't seen it yet (it's still below the screen).
+      if (hide === false && cfg.blockFeedReels && !post.__unreelRechecked && post.querySelector('video')) {
         post.__unreelRechecked = true;
-        hide = post.__unreelHide = true;
-        const key = postKey(post);
-        if (key) { keptPosts.delete(key); hiddenPosts.add(key); }
+        if (safeToHide(post)) {
+          hide = post.__unreelHide = true;
+          const key = postKey(post);
+          if (key) { keptPosts.delete(key); hiddenPosts.add(key); }
+        }
       }
       if (hide) collapsePost(post);
     }
   }
 
-  // Hide a post AND remove the vertical space Instagram reserved for it, so the
-  // feed has no tall blank gaps to jump through. We zero the height on the post,
-  // its slot, and any ancestor up to the feed that is taller than the slot only
-  // because of this post.
   function collapsePost(post) {
     if (post.__unreelCollapsed) return;
     post.__unreelCollapsed = true;

@@ -26,7 +26,7 @@ struct ContentView: View {
             didLoad = true
             QuickActions.install()
             store.apply(settings, reloadIfChanged: false)
-            MessageNotifier.shared.setEnabled(settings.notifications)
+            MessageNotifier.shared.setEnabled(false)   // Instagram blocks inbox checks from outside its app (see MessageNotifier)
             if let thread = router.pendingThread {
                 router.pendingThread = nil
                 store.openThread(thread)
@@ -44,9 +44,6 @@ struct ContentView: View {
             guard didLoad, let thread else { return }
             router.pendingThread = nil
             store.openThread(thread)
-        }
-        .onChange(of: settings.notifications) { _, on in
-            MessageNotifier.shared.setEnabled(on)
         }
         .onReceive(router.$pendingAction) { action in
             guard didLoad, let action else { return }

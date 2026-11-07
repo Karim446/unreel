@@ -4,7 +4,11 @@ import UIKit
 import UserNotifications
 import WebKit
 
-/// Unreel's own DM notifications.
+/// Unreel's own DM notifications. CURRENTLY DISABLED: Instagram refuses inbox
+/// requests that don't come from its own app (the website address answers 404,
+/// the app address answers 400 "Prompt has contribution"), so there's nothing to
+/// check. Use the real Instagram app's notifications instead.
+///
 ///
 /// Why this design: real push notifications need a paid developer account plus a
 /// server that logs in as you — not an option here. Instead Unreel stays running
@@ -175,11 +179,28 @@ final class MessageNotifier: NSObject, ObservableObject, UNUserNotificationCente
 
     // MARK: Checking the inbox
 
-    func checkInbox() async {
-        guard enabled, !checking else { return }
+    /// Runs one inbox check right now (Filters → Test Inbox Check), without
+    /// turning on background notifications.
+    func checkOnce() async {
+        let wasEnabled = enabled
+        enabled = true
+        await checkInbox()
+        enabled = wasEnabled
+    }
+
+    /// One check right now, even with notifications off, to see whether any request
+    /// style works (Filters → Test Inbox Check). Never posts notifications.
+    func testCheck() async {
+        status = "Checking…"
+        Self.workingVariant = nil   // try every style fresh
+        await checkInbox(force: true)
+    }
+
+    func checkInbox(force: Bool = false) async {
+        guard enabled || force, !checking else { return }
         // While you're in the app, only keep track of what's arrived (you're seeing
         // it already); notify only while Unreel is in the background.
-        let quiet = UIApplication.shared.applicationState == .active
+        let quiet = force || UIApplication.shared.applicationState == .active
         checking = true
         defer { checking = false }
 
@@ -192,7 +213,7 @@ final class MessageNotifier: NSObject, ObservableObject, UNUserNotificationCente
         }
 
         let cookieHeader = cookies.map { "\($0.name)=\($0.value)" }.joined(separator: "; ")
-        guard let result = await Self.instagramGET("/api/v1/direct_v2/inbox/?limit=20&persistentBadging=true",
+        guard let result = await Self.instagramGET("/api/v1/direct_v2/inbox/?persistentBadging=true&folder=&limit=10&thread_message_limit=5",
                                                     cookie: cookieHeader, csrf: csrf) else {
             status = "Couldn't reach Instagram (" + Self.time(Date()) + ")"
             return
@@ -296,12 +317,19 @@ final class MessageNotifier: NSObject, ObservableObject, UNUserNotificationCente
         let webHeaders: Bool   // the extra headers the website sends with its own requests
     }
 
-    private static let iosAppUA = "Instagram 360.0.0.30.109 (iPhone15,2; iOS 18_6; en_US; en-US; scale=3.00; 1179x2556; 672535977)"
+    // Instagram checks that the app ID and the user agent belong to the same kind
+    // of client; a mismatch is what produced the 404 and 400 answers before.
+    private static let desktopSafariUA = "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/18.0 Safari/605.1.15"
+    private static let iosAppUA = "Instagram 352.0.0.22.109 (iPhone15,2; iOS 18_1; en_US; en; scale=3.00; 1179x2556; 646546534)"
 
     private static let variants: [Variant] = [
-        Variant(name: "web", base: "https://www.instagram.com", userAgent: WebViewStore.safariUA, appId: "936619743392459", webHeaders: true),
-        Variant(name: "app", base: "https://i.instagram.com", userAgent: iosAppUA, appId: "124024574287414", webHeaders: false),
-        Variant(name: "web-alt", base: "https://i.instagram.com", userAgent: WebViewStore.safariUA, appId: "936619743392459", webHeaders: true),
+        // Desktop website identity: desktop app ID + desktop Safari user agent.
+        Variant(name: "desktop", base: "https://www.instagram.com", userAgent: desktopSafariUA, appId: "936619743392459", webHeaders: true),
+        // iPhone app identity: app user agent + app ID, no website headers.
+        Variant(name: "ios", base: "https://i.instagram.com", userAgent: iosAppUA, appId: "567067343352427", webHeaders: false),
+        Variant(name: "ios-alt", base: "https://i.instagram.com", userAgent: iosAppUA, appId: "124024574287414", webHeaders: false),
+        // iPhone website identity: mobile-web app ID + iPhone Safari user agent.
+        Variant(name: "mobile-web", base: "https://www.instagram.com", userAgent: WebViewStore.safariUA, appId: "1217981644879628", webHeaders: true),
     ]
 
     static func instagramGET(_ path: String, cookie: String, csrf: String) async -> (Data, URLResponse)? {
@@ -320,10 +348,6 @@ final class MessageNotifier: NSObject, ObservableObject, UNUserNotificationCente
             if v.webHeaders {
                 request.setValue("XMLHttpRequest", forHTTPHeaderField: "X-Requested-With")
                 request.setValue("https://www.instagram.com/direct/inbox/", forHTTPHeaderField: "Referer")
-                request.setValue("https://www.instagram.com", forHTTPHeaderField: "Origin")
-                request.setValue(Self.wwwClaim, forHTTPHeaderField: "X-IG-WWW-Claim")
-                request.setValue("129477", forHTTPHeaderField: "X-ASBD-ID")
-                request.setValue("same-origin", forHTTPHeaderField: "Sec-Fetch-Site")
             }
             request.httpShouldHandleCookies = false
             guard let result = try? await URLSession.shared.data(for: request) else {
