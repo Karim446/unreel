@@ -1,0 +1,19 @@
+[
+  {
+    "trigger": {
+      "url-filter": "https?://(www\\.|i\\.|graph\\.)?instagram\\.com/(logging_client_events|ajax/bz|api/v1/ads/).*"
+    },
+    "action": {
+      "type": "block"
+    }
+  },
+  {
+    "trigger": {
+      "url-filter": "https?://.*\\.instagram\\.com/.*"
+    },
+    "action": {
+      "type": "css-display-none",
+      "selector": "a[href='/reels/'], a[href^='/reels/'], a[aria-label='Reels'], div[role='banner'] a[href*='applink.instagram.com']"
+    }
+  }
+]
