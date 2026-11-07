@@ -78,6 +78,8 @@ struct SettingsView: View {
                         view.evaluateJavaScript("window.webkit.messageHandlers.unreelDiag.postMessage('Manual bridge OK; Unreel badge: ' + (document.querySelector('#unreel-tabbar .unreel-badge')?.textContent || 'none'))")
                     }
                     Button("Test Local Notification") { notifier.sendTest() }
+                    Text(notifier.siteDmBadgeStatus)
+                        .font(.footnote).foregroundStyle(.secondary).textSelection(.enabled)
                     Button("Test Inbox Check") { Task { await notifier.testCheck() } }
                     Text(notifier.status).font(.footnote).foregroundStyle(.secondary).textSelection(.enabled)
                     Button("Copy Login for Relay Server") { copyRelayLogin() }

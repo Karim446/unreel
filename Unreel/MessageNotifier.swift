@@ -38,6 +38,44 @@ final class MessageNotifier: NSObject, ObservableObject, UNUserNotificationCente
     // Static: it's read inside the static request helper below.
     private static var wwwClaim: String { UserDefaults.standard.string(forKey: "notifier.wwwClaim") ?? "0" }
 
+    @Published var siteDmBadgeStatus = "Waiting for Instagram's website DM indicator"
+    private var previousSiteDmBadge: Bool?
+
+    func observeSiteDmBadge(_ present: Bool) {
+        let previous = previousSiteDmBadge
+        previousSiteDmBadge = present
+        siteDmBadgeStatus = "Instagram website badge: " + (present ? "red" : "clear")
+        // Initial value is only a baseline, not a new DM. Red -> red is not a new event.
+        guard previous == false && present else { return }
+        guard defaults.object(forKey: "notifications") as? Bool ?? true else {
+            siteDmBadgeStatus = "New red badge, but DM alerts are disabled in Filters"
+            return
+        }
+        Task {
+            let center = UNUserNotificationCenter.current()
+            do {
+                let permitted = try await center.requestAuthorization(options: [.alert, .sound, .badge])
+                guard permitted else {
+                    siteDmBadgeStatus = "Enable Unreel notifications in iPhone Settings"
+                    return
+                }
+                let content = UNMutableNotificationContent()
+                content.title = "Instagram"
+                content.body = "You have a new unread DM."
+                content.sound = .default
+                content.userInfo = ["openInbox": true]
+                let request = UNNotificationRequest(
+                    identifier: "unreel-unread-site-\(UUID().uuidString)",
+                    content: content, trigger: nil
+                )
+                try await center.add(request)
+                siteDmBadgeStatus = "Website badge clear -> red; local alert queued"
+            } catch {
+                siteDmBadgeStatus = "Website badge alert failed: " + error.localizedDescription
+            }
+        }
+    }
+
     func updateClaim(_ value: String) { defaults.set(value, forKey: "notifier.wwwClaim") }
 
     // Live counts come from Unreel's existing Inbox badge observer.

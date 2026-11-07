@@ -812,6 +812,50 @@
     return holder.innerHTML;
   }
 
+  // ---- Live DM signal from Instagram's own bottom navigation -----------------
+  // This is separate from Unreel's .unreel-badge (which requires a broken API).
+  // We only treat a stable clear -> red transition as a NEW alert, not a count.
+  let siteBadgeCandidate = null;
+  let siteBadgeReported = null;
+  let siteBadgeTimer = null;
+  function looksRedBadgeColor(css) {
+    const rgb = String(css || '').match(/rgba?\(\s*(\d+)[,\s]+(\d+)[,\s]+(\d+)/i);
+    if (rgb) return +rgb[1] > 165 && +rgb[2] < 135 && +rgb[3] < 155;
+    const hex = String(css || '').match(/^#([0-9a-f]{6})$/i);
+    return !!hex && parseInt(hex[1].slice(0, 2), 16) > 165 &&
+      parseInt(hex[1].slice(2, 4), 16) < 135 && parseInt(hex[1].slice(4, 6), 16) < 155;
+  }
+  function dmLinkHasBadge(link) {
+    if (!link) return false;
+    if (/\bunread\b|\bnew messages?\b/i.test(link.getAttribute('aria-label') || '')) return true;
+    for (const el of link.querySelectorAll('span, div, circle, rect, path')) {
+      const r = el.getBoundingClientRect();
+      if (r.width < 2 || r.height < 2 || r.width > 42 || r.height > 42) continue;
+      const label = el.getAttribute('aria-label') || '';
+      if (/\bunread\b|\bnew messages?\b/i.test(label)) return true;
+      if (!el.querySelector('svg') && /^\s*\d{1,3}\+?\s*$/.test(el.textContent || '')) return true;
+      const css = getComputedStyle(el);
+      if (looksRedBadgeColor(css.backgroundColor) || looksRedBadgeColor(css.fill) ||
+          looksRedBadgeColor(el.getAttribute('fill'))) return true;
+    }
+    return false;
+  }
+  function inspectSiteDmBadge() {
+    const siteNav = findSiteNav();
+    const original = siteNav && siteNav.querySelector('a[href^="/direct"]');
+    const copied = document.querySelector('#unreel-tabbar a[href^="/direct"]');
+    if (!original && !copied) return;  // No usable baseline yet; don't assume clear.
+    const detected = dmLinkHasBadge(original) || dmLinkHasBadge(copied);
+    if (detected === siteBadgeCandidate) return;
+    siteBadgeCandidate = detected;
+    clearTimeout(siteBadgeTimer);
+    siteBadgeTimer = setTimeout(() => {
+      if (siteBadgeCandidate !== detected || siteBadgeReported === detected) return;
+      siteBadgeReported = detected;
+      try { window.webkit?.messageHandlers?.siteDmBadge?.postMessage(detected); } catch (_) {}
+    }, 450);
+  }
+
   const onInbox = () => /^\/direct\/(inbox|requests|general)/.test(location.pathname) ||
     /^\/direct\/?$/.test(location.pathname);
 
@@ -1989,6 +2033,7 @@
 
     // Keep the tab bar in step with the page in the same frame (no flicker).
     updateTabBar();
+    inspectSiteDmBadge();
     updateHeader();
     updateInboxStatus();
     updatePeek();
