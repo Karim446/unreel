@@ -53,6 +53,7 @@ final class WebViewStore: NSObject, ObservableObject, WKNavigationDelegate, WKUI
         webView.configuration.userContentController.add(self, name: "route")
         webView.configuration.userContentController.add(self, name: "unread")
         webView.configuration.userContentController.add(self, name: "copyText")
+        webView.configuration.userContentController.add(self, name: "saveMedia")
         webView.configuration.userContentController.add(self, name: "siteDmBadge")
         webView.configuration.userContentController.add(self, name: "unreelDiag")
         webView.hideKeyboardAccessoryBar()
@@ -299,6 +300,16 @@ final class WebViewStore: NSObject, ObservableObject, WKNavigationDelegate, WKUI
         }
         if message.name == "siteDmBadge", let present = message.body as? Bool {
             MessageNotifier.shared.observeSiteDmBadge(present)
+            return
+        }
+        if message.name == "saveMedia", let body = message.body as? [String: Any], let url = body["url"] as? String {
+            let isVideo = (body["video"] as? Bool) ?? false
+            Task { @MainActor in
+                let result = await MediaSaver.save(urlString: url, isVideo: isVideo)
+                Haptics.play(result.contains("aved") ? "medium" : "light")
+                let quoted = (try? String(data: JSONSerialization.data(withJSONObject: [result]), encoding: .utf8)) ?? "[\"\"]"
+                _ = try? await self.webView.evaluateJavaScript("window.__unreel && window.__unreel.toast(\(quoted)[0])")
+            }
             return
         }
         if message.name == "copyText", let text = message.body as? String {

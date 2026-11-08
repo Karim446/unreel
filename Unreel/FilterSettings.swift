@@ -10,6 +10,8 @@ final class FilterSettings: ObservableObject {
     @Published var hideExploreGrid: Bool { didSet { defaults.set(hideExploreGrid, forKey: "hideExploreGrid") } }
     @Published var hideAds: Bool { didSet { defaults.set(hideAds, forKey: "hideAds") } }
     @Published var hideOnline: Bool { didSet { defaults.set(hideOnline, forKey: "hideOnline") } }
+    @Published var hideTyping: Bool { didSet { defaults.set(hideTyping, forKey: "hideTyping") } }
+    @Published var followingFeed: Bool { didSet { defaults.set(followingFeed, forKey: "followingFeed") } }
     @Published var notifications: Bool { didSet { defaults.set(notifications, forKey: "notifications") } }
     @Published var hasSeenSetup: Bool { didSet { defaults.set(hasSeenSetup, forKey: "hasSeenSetup") } }
 
@@ -21,6 +23,8 @@ final class FilterSettings: ObservableObject {
             "hideExploreGrid": true,
             "hideAds": true,
             "hideOnline": true,
+            "hideTyping": true,
+            "followingFeed": true,
             "notifications": true,
             "hasSeenSetup": false,
         ])
@@ -30,11 +34,13 @@ final class FilterSettings: ObservableObject {
         hideExploreGrid = defaults.bool(forKey: "hideExploreGrid")
         hideAds = defaults.bool(forKey: "hideAds")
         hideOnline = defaults.bool(forKey: "hideOnline")
+        hideTyping = defaults.bool(forKey: "hideTyping")
+        followingFeed = defaults.bool(forKey: "followingFeed")
         notifications = defaults.bool(forKey: "notifications")
         hasSeenSetup = defaults.bool(forKey: "hasSeenSetup")
     }
 
     var jsConfig: String {
-        "window.__UNREEL__ = {blockReelsTab: \(blockReelsTab), blockFeedReels: \(blockFeedReels), allowDMReels: \(allowDMReels), hideExploreGrid: \(hideExploreGrid), hideAds: \(hideAds), hideOnline: \(hideOnline)};"
+        "window.__UNREEL__ = {blockReelsTab: \(blockReelsTab), blockFeedReels: \(blockFeedReels), allowDMReels: \(allowDMReels), hideExploreGrid: \(hideExploreGrid), hideAds: \(hideAds), hideOnline: \(hideOnline), hideTyping: \(hideTyping), followingFeed: \(followingFeed)};"
     }
 }

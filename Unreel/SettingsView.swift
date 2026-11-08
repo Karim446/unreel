@@ -45,11 +45,17 @@ struct SettingsView: View {
                          : "The Reels tab is back and works normally. \"Block Reels in the feed\" still hides every video post on the home feed.")
                 }
                 Section {
+                    Toggle("Home shows the Following feed", isOn: $settings.followingFeed)
+                } footer: {
+                    Text("Only posts from accounts you follow, newest first, with no suggested posts. It ends when you've seen everything new.")
+                }
+                Section {
                     Toggle("Hide the Explore grid", isOn: $settings.hideExploreGrid)
                     Toggle("Hide ads", isOn: $settings.hideAds)
                     Toggle("Hide my online status", isOn: $settings.hideOnline)
+                    Toggle("Hide when I'm typing", isOn: $settings.hideTyping)
                 } footer: {
-                    Text("Search still works with the Explore grid hidden. Hiding ads removes sponsored posts from the feed and skips sponsored Stories. Hiding your online status stops sending \"Active now\" and \"typing…\" while you still see others'.")
+                    Text("Search still works with the Explore grid hidden. Hiding ads removes sponsored posts from the feed and skips sponsored Stories. Hiding your online status stops sending \"Active now\", and hiding typing stops \"typing…\" from showing to others. You still see theirs.")
                 }
                 Section {
                     NavigationLink("App Icon") { AppIconPicker() }
@@ -62,7 +68,7 @@ struct SettingsView: View {
                 } header: {
                     Text("Extras")
                 } footer: {
-                    Text("Peek: long-press a chat in your inbox to read it without sending \"Seen\". Tap \"Mark as read\" in the chat when you're ready.")
+                    Text("Peek: long-press a chat in your inbox to read it without sending \"Seen\". Long-press a photo, video, profile picture or caption to save it, view it full size, or copy the text.")
                 }
                 Section {
                     Button("Copy Login for Relay Server") { copyRelayLogin() }

@@ -6,7 +6,7 @@
   try { window.webkit?.messageHandlers?.unreelDiag?.postMessage('filter.js injected and running'); } catch (_) {}
 
   const cfg = Object.assign(
-    { blockReelsTab: true, blockFeedReels: true, allowDMReels: true, hideExploreGrid: true, hideAds: true, hideOnline: true },
+    { blockReelsTab: true, blockFeedReels: true, allowDMReels: true, hideExploreGrid: true, hideAds: true, hideOnline: true, hideTyping: true, followingFeed: true },
     window.__UNREEL__ || {}
   );
 
@@ -51,12 +51,15 @@
   // The page tells Instagram you're active (app in the foreground, "typing…")
   // over the same channels. Those messages are held back; asking for *other*
   // people's status (get_presence) still goes through, so you still see them.
-  const PRESENCE_SIGNAL = /foreground|app_?state|set_?presence|update_?presence|presence_?update|ping_?presence|"is_?active"\s*:\s*true|activity_?indicator|is_?typing|typing_?status|\/t_fs|"background"\s*:\s*false/i;
+  // "Active now" (being in the app) and "typing…" are separate settings.
+  const PRESENCE_SIGNAL = /foreground|app_?state|set_?presence|update_?presence|presence_?update|ping_?presence|"is_?active"\s*:\s*true|\/t_fs|"background"\s*:\s*false/i;
+  const TYPING_SIGNAL = /activity_?indicator|is_?typing|typing_?status|"typing"\s*:/i;
   const isPresenceSignal = (url, body) => {
-    if (!cfg.hideOnline) return false;
     const u = String(url || '');
     if (/get_?presence/i.test(u)) return false;   // reading others' status is fine
-    return PRESENCE_SIGNAL.test(u) || PRESENCE_SIGNAL.test(textOf(body));
+    const text = textOf(body);
+    return (cfg.hideOnline && (PRESENCE_SIGNAL.test(u) || PRESENCE_SIGNAL.test(text))) ||
+           (cfg.hideTyping && (TYPING_SIGNAL.test(u) || TYPING_SIGNAL.test(text)));
   };
   const shouldHold = (url, body) => (peeking() && isReadSignal(url, body)) || isPresenceSignal(url, body);
   let heldBack = 0;   // how many read signals were held back (shown in the banner)
@@ -587,10 +590,10 @@
   }
 
   // Run the heart button's own tap handler, exactly as a real tap would.
-  function pressViaReact(el) {
+  function pressViaReact(el, maxSize = 80) {
     for (let node = el, i = 0; node && i < 8; node = node.parentElement, i++) {
       const r = node.getBoundingClientRect();
-      if (i > 0 && (r.width > 80 || r.height > 80)) break;   // only the button, never the video around it
+      if (i > 0 && (r.width > maxSize || r.height > maxSize)) break;   // only the button, never the video around it
       const props = reactProps(node);
       const handler = props && (props.onClick || props.onPress || props.onPointerUp);
       if (typeof handler !== 'function') continue;
@@ -2043,9 +2046,232 @@
     };
   }
 
+  // ---- Following feed as Home ----------------------------------------------------
+  // Instagram's own chronological feed (only accounts you follow). On the home
+  // feed, Unreel picks "Following" from Instagram's own logo menu, so the site
+  // switches without reloading. The menu is hidden while that happens. If the
+  // menu can't be found, it loads the Following address instead (one reload).
+  let followSwitching = false;
+  let followTriedFor = null;
+  const onFollowingFeed = () => /(^|[?&])variant=following(&|$)/.test(location.search);
+
+  async function switchToFollowing() {
+    if (followSwitching) return;
+    followSwitching = true;
+    followTriedFor = location.href;
+    document.documentElement.classList.add('unreel-switching');
+    try {
+      const findLogo = () => document.querySelector('[data-unreel-brand]') ||
+        [...document.querySelectorAll('svg[aria-label="Instagram"]')].find((x) => x.getBoundingClientRect().top < 140);
+      await waitFor(() => !!findLogo(), 2500);   // the header may still be loading
+      const logo = findLogo();
+      if (location.pathname !== '/') return;      // you've moved on in the meantime
+      if (logo) {
+        const target = logo.querySelector('svg') || logo;
+        if (!pressViaReact(target, 320)) fire(logo);   // the logo button is wider than an icon
+        const findItem = () => [...document.querySelectorAll('[role="menu"] *, [role="dialog"] *, [role="listbox"] *, a[href*="variant=following"]')]
+          .find((el) => (el.matches('a[href*="variant=following"]') || (el.childElementCount === 0 && el.textContent.trim() === 'Following')) &&
+                        el.getBoundingClientRect().height > 0);
+        if (await waitFor(() => !!findItem(), 1500)) {
+          const item = findItem();
+          if (!pressViaReact(item, 420)) fire(item.closest('a, [role="menuitem"], [role="button"], button') || item);
+          if (await waitFor(onFollowingFeed, 1500)) return;
+        }
+      }
+      // Couldn't use the menu: load the Following feed directly.
+      location.replace('/?variant=following');
+    } finally {
+      document.documentElement.classList.remove('unreel-switching');
+      followSwitching = false;
+    }
+  }
+
+  function updateFollowingFeed() {
+    if (!cfg.followingFeed || location.pathname !== '/' || onFollowingFeed()) return;
+    if (followTriedFor === location.href) return;   // one attempt per visit
+    switchToFollowing();
+  }
+
+  // ---- Long-press menu: save media, full-size profile picture, copy text -----------
+  // Long-press (half a second, without moving) on:
+  //   * a photo or video  -> "Save to Photos"
+  //   * a profile picture -> "View Profile Picture" (full size, with Save)
+  //   * a caption, comment or bio -> "Copy Text"
+  // (In the inbox, long-press still means Peek; on the home logo, it's the
+  // feed snapshot.)
+  const isAvatar = (img) => {
+    const r = img.getBoundingClientRect();
+    if (Math.abs(r.width - r.height) > 3 || r.width < 28 || r.width > 220) return false;
+    const radius = getComputedStyle(img).borderRadius || '';
+    const parentRadius = img.parentElement ? getComputedStyle(img.parentElement).borderRadius : '';
+    return /50%|9999|999px/.test(radius + parentRadius) || parseFloat(radius) >= r.width / 2 - 1 ||
+      parseFloat(parentRadius) >= r.width / 2 - 1 || /profile picture/i.test(img.alt || '');
+  };
+
+  function mediaUnder(x, y) {
+    for (const el of document.elementsFromPoint(x, y).slice(0, 10)) {
+      if (el.closest && el.closest('#unreel-tabbar, #unreel-sheet')) return null;
+      if (el.tagName === 'IMG' && isAvatar(el)) return { kind: 'avatar', el };
+      if ((el.tagName === 'IMG' || el.tagName === 'VIDEO') && el.getBoundingClientRect().width >= 150) {
+        return { kind: el.tagName === 'VIDEO' ? 'video' : 'photo', el };
+      }
+    }
+    return null;
+  }
+
+  function textUnder(target) {
+    let best = null;
+    for (let el = target, i = 0; el && el !== document.body && i < 6; el = el.parentElement, i++) {
+      if (el.closest('input, textarea, [contenteditable="true"], #unreel-tabbar')) return null;
+      const text = (el.innerText || el.textContent || '').trim();
+      if (!text || text.length > 2200) break;
+      if ([...el.querySelectorAll('img, video')].some((m) => m.getBoundingClientRect().width > 120)) break;
+      best = text;
+      if (/^(article|li|h1|h2|section)$/i.test(el.tagName)) break;
+    }
+    return best;
+  }
+
+  const largestSrc = (img) => {
+    const set = (img.getAttribute('srcset') || '').split(',').map((p) => p.trim().split(/\s+/))
+      .map(([u, w]) => ({ u, w: parseFloat(w) || 0 })).filter((c) => c.u);
+    set.sort((a, b) => b.w - a.w);
+    return (set[0] && set[0].u) || img.currentSrc || img.src;
+  };
+
+  async function mediaInfo(id) {
+    try {
+      const res = await realFetch(`/api/v1/media/${id}/info/`, {
+        credentials: 'include',
+        headers: { 'x-ig-app-id': '936619743392459', 'x-requested-with': 'XMLHttpRequest' },
+      });
+      const data = await res.json();
+      return data && data.items && data.items[0];
+    } catch (_) { return null; }
+  }
+
+  // The best downloadable address for a photo or video.
+  async function downloadUrl(found) {
+    const el = found.el;
+    if (found.kind === 'photo') return largestSrc(el);
+    const direct = el.currentSrc || el.src || (el.querySelector('source') || {}).src || '';
+    if (/^https:/.test(direct)) return direct;
+    // Streamed video (blob:): ask Instagram for the file, using the post's ID.
+    const code = shortcodeFor(el);
+    const id = mediaIdFromReact(el, 25) || (code && shortcodeToId(code));
+    const item = id && await mediaInfo(id);
+    const media = item && (item.video_versions ? item : (item.carousel_media || []).find((m) => m.video_versions));
+    const best = media && media.video_versions.slice().sort((a, b) => (b.width || 0) - (a.width || 0))[0];
+    return best ? best.url : null;
+  }
+
+  async function fullProfilePicture(found) {
+    // Whose picture: the profile you're on, or the account the picture links to.
+    const link = found.el.closest('a[href]');
+    const fromLink = link && (link.getAttribute('href') || '').match(/^\/([A-Za-z0-9._]{1,30})\/$/);
+    const fromPage = location.pathname.match(/^\/([A-Za-z0-9._]{1,30})\/?$/);
+    const username = (fromLink && fromLink[1]) || (fromPage && fromPage[1]);
+    if (username && !['explore', 'direct', 'reels', 'stories', 'accounts'].includes(username)) {
+      try {
+        const res = await realFetch(`/api/v1/users/web_profile_info/?username=${encodeURIComponent(username)}`, {
+          credentials: 'include',
+          headers: { 'x-ig-app-id': '936619743392459', 'x-requested-with': 'XMLHttpRequest' },
+        });
+        const data = await res.json();
+        const user = data && data.data && data.data.user;
+        if (user && (user.profile_pic_url_hd || user.profile_pic_url)) return user.profile_pic_url_hd || user.profile_pic_url;
+      } catch (_) {}
+    }
+    return largestSrc(found.el);
+  }
+
+  function saveToPhotos(url, isVideo) {
+    if (!url) { showToast('This one can\u2019t be saved'); return; }
+    showToast('Saving\u2026');
+    window.webkit?.messageHandlers?.saveMedia?.postMessage({ url, video: !!isVideo });
+  }
+
+  function closeSheet() {
+    const sheet = document.getElementById('unreel-sheet');
+    if (!sheet) return;
+    sheet.classList.remove('show');
+    setTimeout(() => sheet.remove(), 220);
+  }
+
+  function openSheet(actions) {
+    closeSheet();
+    const sheet = document.createElement('div');
+    sheet.id = 'unreel-sheet';
+    sheet.innerHTML = '<div class="unreel-sheet-backdrop"></div><div class="unreel-sheet-panel"></div>';
+    const panel = sheet.querySelector('.unreel-sheet-panel');
+    for (const [label, run] of [...actions, ['Cancel', null]]) {
+      const b = document.createElement('button');
+      b.type = 'button';
+      b.textContent = label;
+      if (!run) b.className = 'cancel';
+      b.addEventListener('click', (e) => { e.preventDefault(); e.stopPropagation(); closeSheet(); if (run) run(); });
+      panel.appendChild(b);
+    }
+    sheet.querySelector('.unreel-sheet-backdrop').addEventListener('click', closeSheet);
+    document.body.appendChild(sheet);
+    requestAnimationFrame(() => sheet.classList.add('show'));
+  }
+
+  function openViewer(url) {
+    const v = document.createElement('div');
+    v.id = 'unreel-viewer';
+    v.innerHTML = '<img alt=""><div class="unreel-viewer-bar"><button type="button" class="save">Save</button><button type="button" class="close">Done</button></div>';
+    v.querySelector('img').src = url;
+    v.querySelector('.save').addEventListener('click', (e) => { e.stopPropagation(); saveToPhotos(url, false); });
+    v.querySelector('.close').addEventListener('click', (e) => { e.stopPropagation(); v.remove(); });
+    v.addEventListener('click', () => v.remove());
+    document.body.appendChild(v);
+  }
+
+  let holdTimer = null;
+  let holdStart = null;
+  let swallowHoldClickUntil = 0;
+  window.addEventListener('touchstart', (e) => {
+    clearTimeout(holdTimer);
+    if (e.touches.length !== 1 || onInbox()) return;
+    const target = e.target.closest ? e.target : e.target.parentElement;
+    if (!target || target.closest('input, textarea, [contenteditable="true"], #unreel-tabbar, #unreel-sheet, #unreel-viewer, [data-unreel-brand], button, [role="button"] svg')) return;
+    if (drag) return;   // swiping a reel closed
+    const t = e.touches[0];
+    holdStart = { x: t.clientX, y: t.clientY };
+    holdTimer = setTimeout(() => {
+      const found = mediaUnder(holdStart.x, holdStart.y);
+      const actions = [];
+      if (found && found.kind === 'avatar') {
+        actions.push(['View Profile Picture', async () => openViewer(await fullProfilePicture(found))]);
+      } else if (found) {
+        actions.push([found.kind === 'video' ? 'Save Video' : 'Save Photo', async () => saveToPhotos(await downloadUrl(found), found.kind === 'video')]);
+      }
+      const text = !found || found.kind === 'avatar' ? textUnder(target) : null;
+      if (text) actions.push(['Copy Text', () => { window.webkit?.messageHandlers?.copyText?.postMessage(text); showToast('Copied'); }]);
+      if (!actions.length) return;
+      haptic('medium');
+      swallowHoldClickUntil = Date.now() + 700;   // lifting the finger shouldn't also tap
+      openSheet(actions);
+    }, 500);
+  }, { capture: true, passive: true });
+  window.addEventListener('touchmove', (e) => {
+    if (!holdStart) return;
+    const t = e.touches[0];
+    if (Math.hypot(t.clientX - holdStart.x, t.clientY - holdStart.y) > 10) clearTimeout(holdTimer);
+  }, { capture: true, passive: true });
+  ['touchend', 'touchcancel'].forEach((type) => window.addEventListener(type, () => clearTimeout(holdTimer), { capture: true, passive: true }));
+  window.addEventListener('click', (e) => {
+    if (e.isTrusted && Date.now() < swallowHoldClickUntil && !(e.target.closest && e.target.closest('#unreel-sheet'))) {
+      e.preventDefault();
+      e.stopImmediatePropagation();
+    }
+  }, true);
+
   // ---- Actions the app can trigger (Home Screen quick actions) ----------------
 
   window.__unreel = {
+    toast(text) { if (typeof text === 'string') showToast(text); },
     // Data the app fetched for the page.
     setUnread(n) {
       if (typeof n !== 'number' || n === unreadCount) return;
@@ -2098,6 +2324,20 @@
     // Online dot on notes/stories avatars.
     // Online dot on profile photos in the inbox.
     '.unreel-online { position: absolute; right: 2%; bottom: 2%; border-radius: 50%; background: #3ec95a; border: 3px solid var(--unreel-page-bg, #fff); box-sizing: border-box; pointer-events: none; }',
+    // While switching Home to the Following feed, keep Instagram's logo menu out of sight.
+    '.unreel-switching [role="menu"], .unreel-switching [role="dialog"], .unreel-switching [role="listbox"] { opacity: 0 !important; }',
+    // Long-press action sheet (iOS style) and the full-size picture viewer.
+    '#unreel-sheet { position: fixed; inset: 0; z-index: 2147483600; }',
+    '#unreel-sheet .unreel-sheet-backdrop { position: absolute; inset: 0; background: rgba(0,0,0,0.35); opacity: 0; transition: opacity .2s; }',
+    '#unreel-sheet .unreel-sheet-panel { position: absolute; left: 10px; right: 10px; bottom: calc(10px + env(safe-area-inset-bottom, 0px)); display: flex; flex-direction: column; gap: 1px; border-radius: 14px; overflow: hidden; transform: translateY(110%); transition: transform .22s ease-out; }',
+    '#unreel-sheet.show .unreel-sheet-backdrop { opacity: 1; } #unreel-sheet.show .unreel-sheet-panel { transform: none; }',
+    '#unreel-sheet button { border: 0; padding: 17px; font: 500 17px -apple-system, system-ui, sans-serif; color: #0a84ff; background: rgba(250,250,250,0.97); }',
+    '#unreel-sheet button.cancel { margin-top: 8px; border-radius: 14px; font-weight: 600; }',
+    '@media (prefers-color-scheme: dark) { #unreel-sheet button { background: rgba(44,44,46,0.97); } }',
+    '#unreel-viewer { position: fixed; inset: 0; z-index: 2147483601; background: #000; display: flex; align-items: center; justify-content: center; }',
+    '#unreel-viewer img { max-width: 100%; max-height: 100%; object-fit: contain; }',
+    '#unreel-viewer .unreel-viewer-bar { position: absolute; left: 0; right: 0; top: calc(12px + env(safe-area-inset-top, 0px)); display: flex; justify-content: space-between; padding: 0 16px; }',
+    '#unreel-viewer button { border: 0; border-radius: 999px; padding: 8px 16px; font: 600 15px -apple-system, system-ui, sans-serif; color: #fff; background: rgba(255,255,255,0.18); }',
     // Peek banner and toast.
     '#unreel-peek { position: fixed; left: 50%; transform: translateX(-50%); z-index: 2147483001; display: flex; align-items: center; gap: 10px; padding: 7px 8px 7px 14px; border-radius: 999px; font-size: 13px; font-weight: 600; color: #fff; background: rgba(40,40,46,0.92); box-shadow: 0 4px 16px rgba(0,0,0,0.25); white-space: nowrap; }',
     '#unreel-peek button { border: 0; border-radius: 999px; padding: 5px 10px; font: inherit; font-size: 12px; color: #000; background: #fff; }',
@@ -2197,6 +2437,7 @@
     // Keep the tab bar in step with the page in the same frame (no flicker).
     updateTabBar();
     updateHeader();
+    updateFollowingFeed();
     updateInboxStatus();
     updatePeek();
 
