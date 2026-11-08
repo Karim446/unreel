@@ -1453,39 +1453,61 @@
     return screenBottom > lastBottom + window.innerHeight * 0.45;
   }
 
-  function endFeed(sc) {
-    const post = lastShownPost();
-    if (!post) return;
-    const clip = feedContainer(post, sc);
-    const clipTop = pageY(sc, clip.getBoundingClientRect().top);
-    const end = pageY(sc, post.getBoundingClientRect().bottom) + CARD_SPACE;
+  // Where the feed ends, as a position on the page (kept so the trim can be
+  // re-applied if Instagram redraws the feed).
+  let feedEndY = 0;
 
-    feedEnded = true;
+  function applyTrim(sc) {
+    const anyPost = document.querySelector('article');
+    if (!anyPost) return;
+    const clip = feedContainer(anyPost, sc);
+    if (feedClip && feedClip !== clip) feedClip.removeAttribute('data-unreel-clip');
     feedClip = clip;
-    document.documentElement.classList.add('unreel-feed-end');   // also stops the endless loading
-    if (getComputedStyle(clip).position === 'static') clip.style.position = 'relative';
-    clip.style.maxHeight = `${Math.max(0, end - clipTop)}px`;
-    clip.style.overflow = 'hidden';
-
+    const clipTop = pageY(sc, clip.getBoundingClientRect().top);
+    // A CSS rule does the trimming (via this marker + a size variable), so it
+    // survives Instagram re-rendering the element; inline styles didn't, which
+    // is why scrolling up and back down could bring the endless feed back.
+    clip.setAttribute('data-unreel-clip', '');
+    document.documentElement.style.setProperty('--unreel-clip-h', `${Math.max(0, feedEndY - clipTop)}px`);
     let card = document.getElementById('unreel-caught-up');
     if (!card) {
       card = document.createElement('div');
       card.id = 'unreel-caught-up';
       card.innerHTML = '<div class="unreel-check">✓</div><div class="unreel-title">You\u2019re all caught up</div><div class="unreel-sub">Everything else here was Reels or ads.</div>';
+      requestAnimationFrame(() => card.classList.add('show'));
     }
-    clip.appendChild(card);
-    requestAnimationFrame(() => card.classList.add('show'));
+    if (card.parentElement !== clip) clip.appendChild(card);
+  }
+
+  function endFeed(sc) {
+    const post = lastShownPost();
+    if (!post) return;
+    feedEndY = pageY(sc, post.getBoundingClientRect().bottom) + CARD_SPACE;
+    feedEnded = true;
+    document.documentElement.classList.add('unreel-feed-end');   // also stops the endless loading
+    applyTrim(sc);
     // The page is now shorter; iOS settles you at the new end on its own.
+  }
+
+  // Run on every quiet pass: if Instagram redrew the feed, put the trim back.
+  function keepFeedTrimmed() {
+    if (!feedEnded || location.pathname !== '/') return;
+    const card = document.getElementById('unreel-caught-up');
+    if (!feedClip || !feedClip.isConnected || !feedClip.hasAttribute('data-unreel-clip') ||
+        !card || !card.isConnected) {
+      applyTrim(feedScroller || scrollerOf(null));
+    }
   }
 
   function unendFeed() {
     feedEnded = false;
+    feedEndY = 0;
     document.documentElement.classList.remove('unreel-feed-end');
+    document.documentElement.style.removeProperty('--unreel-clip-h');
     const card = document.getElementById('unreel-caught-up');
     if (card) card.remove();
     if (feedClip) {
-      feedClip.style.maxHeight = '';
-      feedClip.style.overflow = '';
+      feedClip.removeAttribute('data-unreel-clip');
       feedClip = null;
     }
   }
@@ -2011,10 +2033,57 @@
         break;
       }
     }
-    // 2. Otherwise (or as well), a double-click event on the message itself.
+    // 2. Otherwise, a double-click event on the message itself.
     if (!(await waitFor(() => heartsNear(target) > before, 350))) target.dispatchEvent(new MouseEvent('dblclick', opts));
-    if (await waitFor(() => heartsNear(target) > before, 600)) haptic('medium');
+    if (await waitFor(() => heartsNear(target) > before, 500)) { haptic('medium'); return; }
+
+    // 3. Last resort: Instagram's own "React" button on that message, then the heart.
+    const row = target.closest('[role="row"], [role="gridcell"], [role="listitem"]') ||
+      (target.parentElement && target.parentElement.parentElement && target.parentElement.parentElement.parentElement) || target;
+    for (const type of ['pointerover', 'pointerenter', 'mouseover', 'mouseenter', 'mousemove']) {
+      row.dispatchEvent(new MouseEvent(type, { bubbles: true, cancelable: true, view: window, clientX: x, clientY: y }));
+    }
+    const reactButton = await (async () => {
+      let found = null;
+      await waitFor(() => !!(found = [...row.querySelectorAll('svg[aria-label], [aria-label]')]
+        .find((el) => /react/i.test(el.getAttribute('aria-label') || ''))), 700);
+      return found;
+    })();
+    if (!reactButton) return;
+    if (!pressViaReact(reactButton)) fire(reactButton);
+    let heart = null;
+    await waitFor(() => !!(heart = [...document.querySelectorAll('[role="dialog"] *, [role="menu"] *, [role="listbox"] *, [role="tooltip"] *')]
+      .find((el) => (!el.childElementCount && /^\s*\u2764\ufe0f?\s*$/.test(el.textContent)) ||
+                    /red heart|\u2764/i.test((el.getAttribute && el.getAttribute('aria-label')) || ''))), 1200);
+    if (!heart) return;
+    if (!pressViaReact(heart, 120)) fire(heart.closest('button, [role="button"]') || heart);
+    if (await waitFor(() => heartsNear(target) > before, 800)) haptic('medium');
   }
+
+  // Taps on shared reels/posts in a chat: Instagram may open them on the "finger
+  // lifted" event rather than on the click, so the hold has to start there too.
+  // These listeners keep that first tap from reaching Instagram until we know
+  // whether a second tap is coming (the tap is replayed if not).
+  for (const type of ['pointerup', 'mouseup', 'touchend']) {
+    window.addEventListener(type, (e) => {
+      if (replaying || !location.pathname.startsWith('/direct/t/')) return;
+      const p = e.changedTouches ? e.changedTouches[0] : e;
+      if (!p || !chatMediaAt(p.clientX, p.clientY)) return;
+      if (chatMoved) return;   // it was a scroll, not a tap
+      e.stopImmediatePropagation();
+    }, { capture: true, passive: true });
+  }
+  let chatDown = null;
+  let chatMoved = false;
+  window.addEventListener('touchstart', (e) => {
+    const t = e.touches[0];
+    chatDown = t ? { x: t.clientX, y: t.clientY } : null;
+    chatMoved = false;
+  }, { capture: true, passive: true });
+  window.addEventListener('touchmove', (e) => {
+    const t = e.touches[0];
+    if (chatDown && t && Math.hypot(t.clientX - chatDown.x, t.clientY - chatDown.y) > 10) chatMoved = true;
+  }, { capture: true, passive: true });
 
   function handleChatTap(e) {
     const media = chatMediaAt(e.clientX, e.clientY);
@@ -2040,7 +2109,7 @@
       timer: setTimeout(() => {
         chatPending = null;
         replaying = true;
-        original.dispatchEvent(new MouseEvent('click', { bubbles: true, cancelable: true, clientX: x, clientY: y, view: window }));
+        fire(original);   // the full tap: pointer, mouse and click events
         replaying = false;
       }, DOUBLE_TAP_MS),
     };
@@ -2237,15 +2306,16 @@
     const target = e.target.closest ? e.target : e.target.parentElement;
     if (!target || target.closest('input, textarea, [contenteditable="true"], #unreel-tabbar, #unreel-sheet, #unreel-viewer, [data-unreel-brand], button, [role="button"] svg')) return;
     if (drag) return;   // swiping a reel closed
+    // Holding a story (or a full-screen reel) pauses it: that must never open a menu.
+    if (location.pathname.startsWith('/stories/') || viewerVideo()) return;
     const t = e.touches[0];
     holdStart = { x: t.clientX, y: t.clientY };
     holdTimer = setTimeout(() => {
       const found = mediaUnder(holdStart.x, holdStart.y);
       const actions = [];
+      // (Saving photos/videos lives in each post's/story's ⋯ menu instead.)
       if (found && found.kind === 'avatar') {
         actions.push(['View Profile Picture', async () => openViewer(await fullProfilePicture(found))]);
-      } else if (found) {
-        actions.push([found.kind === 'video' ? 'Save Video' : 'Save Photo', async () => saveToPhotos(await downloadUrl(found), found.kind === 'video')]);
       }
       const text = !found || found.kind === 'avatar' ? textUnder(target) : null;
       if (text) actions.push(['Copy Text', () => { window.webkit?.messageHandlers?.copyText?.postMessage(text); showToast('Copied'); }]);
@@ -2267,6 +2337,71 @@
       e.stopImmediatePropagation();
     }
   }, true);
+
+  // ---- "Save to Photos" in the ⋯ menu of posts, reels and stories -------------------
+  // When you tap a ⋯ button, we remember which post/reel/story it belongs to.
+  // When Instagram's menu then opens, a "Save to Photos" (or "Save Video") item
+  // is added to it, styled exactly like Instagram's own items (it's a copy of one).
+  let menuContext = null;   // { media, at }
+
+  const MORE_LABEL = /^(more( options)?|options|menu)$/i;
+
+  function mediaForMenu(button) {
+    const scope = button.closest('article') || button.closest('[role="dialog"]') ||
+      (location.pathname.startsWith('/stories/') ? document : null);
+    if (!scope) return null;
+    // The largest photo/video in that post, reel or story (the one on screen).
+    let best = null;
+    let bestArea = 0;
+    for (const m of scope.querySelectorAll('img, video')) {
+      const r = m.getBoundingClientRect();
+      const area = Math.max(0, Math.min(r.right, window.innerWidth) - Math.max(r.left, 0)) *
+                   Math.max(0, Math.min(r.bottom, window.innerHeight) - Math.max(r.top, 0));
+      if (r.width >= 150 && area > bestArea && !isAvatar(m)) { best = m; bestArea = area; }
+    }
+    return best;
+  }
+
+  window.addEventListener('click', (e) => {
+    const t = e.target.closest ? e.target : e.target.parentElement;
+    const svg = t && (t.closest('svg[aria-label]') || (t.querySelector && t.querySelector('svg[aria-label]')));
+    if (!svg || !MORE_LABEL.test(svg.getAttribute('aria-label').trim())) return;
+    const media = mediaForMenu(svg);
+    menuContext = media ? { media, at: Date.now() } : null;
+  }, true);
+
+  const MENU_WORDS = /^(report|unfollow|follow|copy link|go to post|share( to\.\.\.)?|about this account|add to favorites|remove from favorites|hide|embed|not interested|cancel|mute|why you're seeing this post|turn on post notifications)$/i;
+
+  function addSaveToMenu() {
+    if (!menuContext || Date.now() - menuContext.at > 4000 || document.getElementById('unreel-menu-save')) return;
+    const media = menuContext.media;
+    if (!media || !media.isConnected) return;
+    // Instagram's menu: a group of buttons with familiar labels.
+    const items = [...document.querySelectorAll('[role="dialog"] button, [role="dialog"] [role="button"], [role="menu"] [role="menuitem"], [role="menu"] button')]
+      .filter((b) => MENU_WORDS.test(b.textContent.trim()) && b.getBoundingClientRect().height > 0);
+    if (!items.length) return;
+    const first = items.find((b) => !/^cancel$/i.test(b.textContent.trim())) || items[0];
+    const isVideo = media.tagName === 'VIDEO';
+    const item = first.cloneNode(true);
+    item.id = 'unreel-menu-save';
+    // Replace the label text with ours, keeping Instagram's styling.
+    const leaves = [...item.querySelectorAll('*')].filter((el) => !el.childElementCount && el.textContent.trim());
+    (leaves[0] || item).textContent = isVideo ? 'Save Video' : 'Save to Photos';
+    leaves.slice(1).forEach((el) => { el.textContent = ''; });
+    if (!leaves.length) item.textContent = isVideo ? 'Save Video' : 'Save to Photos';
+    item.style.color = '';
+    item.addEventListener('click', async (e) => {
+      e.preventDefault();
+      e.stopImmediatePropagation();
+      const kind = isVideo ? 'video' : 'photo';
+      // Close Instagram's menu using its own Cancel (or Escape), then save.
+      const cancel = items.find((b) => /^cancel$/i.test(b.textContent.trim()));
+      if (cancel) fire(cancel); else document.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', bubbles: true }));
+      saveToPhotos(await downloadUrl({ kind, el: media }), isVideo);
+    }, true);
+    first.parentElement.insertBefore(item, first);
+    menuContext = null;
+  }
 
   // ---- Actions the app can trigger (Home Screen quick actions) ----------------
 
@@ -2338,6 +2473,8 @@
     '#unreel-viewer img { max-width: 100%; max-height: 100%; object-fit: contain; }',
     '#unreel-viewer .unreel-viewer-bar { position: absolute; left: 0; right: 0; top: calc(12px + env(safe-area-inset-top, 0px)); display: flex; justify-content: space-between; padding: 0 16px; }',
     '#unreel-viewer button { border: 0; border-radius: 999px; padding: 8px 16px; font: 600 15px -apple-system, system-ui, sans-serif; color: #fff; background: rgba(255,255,255,0.18); }',
+    // Multi-photo posts: no left/right arrow buttons, just swipe.
+    'article button[aria-label="Next"], article button[aria-label="Go back"], article button[aria-label="Go Back"], article [role="button"][aria-label="Next"], article [role="button"][aria-label="Go back"], article [role="button"][aria-label="Go Back"] { display: none !important; }',
     // Peek banner and toast.
     '#unreel-peek { position: fixed; left: 50%; transform: translateX(-50%); z-index: 2147483001; display: flex; align-items: center; gap: 10px; padding: 7px 8px 7px 14px; border-radius: 999px; font-size: 13px; font-weight: 600; color: #fff; background: rgba(40,40,46,0.92); box-shadow: 0 4px 16px rgba(0,0,0,0.25); white-space: nowrap; }',
     '#unreel-peek button { border: 0; border-radius: 999px; padding: 5px 10px; font: inherit; font-size: 12px; color: #000; background: #fff; }',
@@ -2349,6 +2486,7 @@
     '[data-unreel-status]::after { content: attr(data-unreel-status); font-size: 14px; opacity: 0.65; }',
     // End of the feed: stop the endless loading once everything left is hidden.
     '.unreel-feed-end [role="progressbar"], .unreel-feed-end [data-visualcompletion="loading-state"], .unreel-feed-end svg[aria-label^="Loading"] { display: none !important; }',
+    '.unreel-feed-end [data-unreel-clip] { max-height: var(--unreel-clip-h) !important; overflow: hidden !important; position: relative !important; }',
     '#unreel-caught-up { position: absolute; left: 0; right: 0; bottom: 0; height: 230px; box-sizing: border-box; padding-top: 40px; text-align: center; color: #f5f5f5; opacity: 0; transition: opacity .3s ease; pointer-events: none; }',
     '#unreel-caught-up.show { opacity: 1; }',
     '@media (prefers-color-scheme: light) { #unreel-caught-up { color: #000; } }',
@@ -2403,7 +2541,7 @@
     const path = location.pathname;
 
     resetWallOnNavigate();
-    if (path === '/') updateFeed();
+    if (path === '/') { updateFeed(); keepFeedTrimmed(); }
 
     if (scrollingNow()) {
       check(lastPath);
@@ -2437,6 +2575,7 @@
     // Keep the tab bar in step with the page in the same frame (no flicker).
     updateTabBar();
     updateHeader();
+    addSaveToMenu();
     updateFollowingFeed();
     updateInboxStatus();
     updatePeek();
