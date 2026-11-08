@@ -238,7 +238,6 @@ final class WebViewStore: NSObject, ObservableObject, WKNavigationDelegate, WKUI
     /// Swipe in from the left edge: the page follows your finger over Instagram's
     /// dark background, and going far enough (or flicking) goes back.
     @objc private func handleEdgePan(_ pan: UIScreenEdgePanGestureRecognizer) {
-        guard webView.canGoBack else { return }
         let width = max(webView.bounds.width, 1)
         let dx = max(0, pan.translation(in: webView).x)
 
@@ -256,10 +255,17 @@ final class WebViewStore: NSObject, ObservableObject, WKNavigationDelegate, WKUI
                     self.webView.transform = CGAffineTransform(translationX: width, y: 0)
                     self.webView.alpha = 0.5
                 } completion: { _ in
-                    self.webView.goBack()
-                    self.webView.transform = .identity
-                    self.webView.alpha = 0
-                    UIView.animate(withDuration: 0.18, delay: 0.05, options: []) { self.webView.alpha = 1 }
+                    // First ask the page to close whatever is open on top (a reel
+                    // someone sent you, the comments sheet, a menu). Only if
+                    // nothing was open does the swipe go back a page, so backing
+                    // out of a reel lands you in the chat, not out of it.
+                    self.webView.evaluateJavaScript("window.__unreel ? window.__unreel.back() : false") { result, _ in
+                        let closedSomething = (result as? Bool) ?? false
+                        if !closedSomething && self.webView.canGoBack { self.webView.goBack() }
+                        self.webView.transform = .identity
+                        self.webView.alpha = 0
+                        UIView.animate(withDuration: 0.18, delay: 0.05, options: []) { self.webView.alpha = 1 }
+                    }
                 }
             } else {
                 snapBack()

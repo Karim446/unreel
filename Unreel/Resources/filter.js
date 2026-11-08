@@ -323,13 +323,25 @@
     }
   }
 
+  // The reel viewer's own close/back button: the one actually on top of the screen
+  // (the chat's back arrow underneath also exists, and must never be picked).
+  function viewerCloseButton(video) {
+    const scope = (video && video.closest('[role="dialog"]')) || document;
+    for (const el of scope.querySelectorAll('[aria-label="Close"], [aria-label="Back"], [aria-label="Go back"]')) {
+      const r = el.getBoundingClientRect();
+      if (!r.width || r.top > 160) continue;
+      const hit = document.elementFromPoint ? document.elementFromPoint(r.left + r.width / 2, r.top + r.height / 2) : el;
+      if (!hit || hit === el || el.contains(hit) || hit.contains(el)) return el;
+    }
+    return null;
+  }
+
   function exitReel(video) {
     unlockScroll();
     // An overlay viewer has its own close button; prefer it.
-    const dialog = video && video.closest('[role="dialog"]');
-    const close = dialog && dialog.querySelector('[aria-label="Close"], [aria-label="Back"]');
+    const close = viewerCloseButton(video);
     if (close) {
-      fire(close);
+      if (!pressViaReact(close)) fire(close);
       setTimeout(() => resetPage(true), 60);
     } else if (spaNavigated && history.length > 1) {
       history.back();
@@ -345,6 +357,7 @@
     lastTouch = Date.now();
     drag = null;
     if (!reelsRestricted || e.touches.length !== 1) return;
+    if (document.getElementById('unreel-comments')) return;   // swiping the comments sheet, not the reel
     const video = viewerVideo();
     if (!video) return;
     const t = e.touches[0];
@@ -2750,24 +2763,34 @@
       if (btn) { e.preventDefault(); toggleCommentLike(btn); }
     });
     sheet.querySelector('.uc-bar').addEventListener('submit', (e) => { e.preventDefault(); postComment(sheet.querySelector('.uc-bar input')); });
-    // Drag the grab bar / title down to close.
-    let startY = null;
+    // Swipe down to close, like the app: from the grab bar/title, or anywhere on
+    // the list once it's scrolled to the top. This closes only the comments; the
+    // reel underneath (and the chat) stay right where they were.
     const panel = sheet.querySelector('.uc-panel');
-    const head = [sheet.querySelector('.uc-grab'), sheet.querySelector('.uc-title')];
-    head.forEach((h) => {
-      h.addEventListener('touchstart', (e) => { startY = e.touches[0].clientY; panel.style.transition = 'none'; }, { passive: true });
-      h.addEventListener('touchmove', (e) => {
-        if (startY === null) return;
-        panel.style.transform = `translateY(${Math.max(0, e.touches[0].clientY - startY)}px)`;
-      }, { passive: true });
-      h.addEventListener('touchend', (e) => {
-        const dy = (e.changedTouches[0] || {}).clientY - startY;
-        panel.style.transition = '';
-        panel.style.transform = '';
-        startY = null;
-        if (dy > 90) closeComments();
-      }, { passive: true });
-    });
+    let startY = null;
+    let fromList = false;
+    panel.addEventListener('touchstart', (e) => {
+      const t = e.target.closest ? e.target : e.target.parentElement;
+      if (t && t.closest('.uc-bar')) { startY = null; return; }   // typing area: no drag
+      fromList = !!(t && t.closest('.uc-list'));
+      if (fromList && list.scrollTop > 0) { startY = null; return; }   // scrolling the list
+      startY = e.touches[0].clientY;
+      panel.style.transition = 'none';
+    }, { passive: true });
+    panel.addEventListener('touchmove', (e) => {
+      if (startY === null) return;
+      const dy = e.touches[0].clientY - startY;
+      if (fromList && (dy < 0 || list.scrollTop > 0)) { startY = null; panel.style.transform = ''; return; }
+      panel.style.transform = `translateY(${Math.max(0, dy)}px)`;
+    }, { passive: true });
+    panel.addEventListener('touchend', (e) => {
+      if (startY === null) return;
+      const dy = (e.changedTouches[0] || {}).clientY - startY;
+      startY = null;
+      panel.style.transition = '';
+      panel.style.transform = '';
+      if (dy > 90) closeComments();
+    }, { passive: true });
     panel.style.color = isDarkColor(pageBg()) ? '#f5f5f5' : '#000';
     panel.style.background = pageBg();
     document.body.appendChild(sheet);
@@ -2796,6 +2819,17 @@
   // ---- Actions the app can trigger (Home Screen quick actions) ----------------
 
   window.__unreel = {
+    // Back swipe from the screen edge: close whatever is open on top first.
+    // Returns true if something was closed (then the app doesn't go back a page).
+    back() {
+      if (document.getElementById('unreel-comments')) { closeComments(); return true; }
+      const pic = document.getElementById('unreel-viewer');
+      if (pic) { pic.remove(); return true; }
+      if (document.getElementById('unreel-sheet')) { closeSheet(); return true; }
+      const video = viewerVideo();
+      if (video) { exitReel(video); return true; }
+      return false;
+    },
     toast(text) { if (typeof text === 'string') showToast(text); },
     // Data the app fetched for the page.
     setUnread(n) {
