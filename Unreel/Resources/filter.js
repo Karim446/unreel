@@ -1210,66 +1210,78 @@
   // We tag the pieces and reposition them with CSS (nothing is removed, so all
   // three still work).
 
+  // Instagram's labels for the two header icons (when it provides them).
+  const HEART_LABEL = /notification|activity|heart|^like$/i;
+  const PLUS_LABEL = /new post|create|^new$/i;
+  const labelOf = (el) => (el.getAttribute && el.getAttribute('aria-label')) || '';
+
   function updateHeader() {
+    const html = document.documentElement;
     const onFeed = location.pathname === '/';
-    document.documentElement.classList.toggle('unreel-feed-header', onFeed);
+    html.classList.toggle('unreel-feed-header', onFeed);
     if (!onFeed) return;
+
+    // Already set up correctly? (The moved button must be the +, never the heart.)
     const existing = document.querySelector('[data-unreel-header]');
-    if (existing && existing.isConnected && existing.querySelector('[data-unreel-newpost]')) return;
+    const moved = existing && existing.isConnected && existing.querySelector('[data-unreel-newpost]');
+    if (moved && ![...moved.querySelectorAll('svg')].some((svg) => HEART_LABEL.test(labelOf(svg)))) return;
 
-    // Find the pieces by position rather than by label (labels vary): the wide
-    // logo, the heart at the far right, and the + just left of the heart.
-    const inHeader = (el) => {
-      if (el.closest('#unreel-tabbar')) return false;
-      const r = el.getBoundingClientRect();
-      return r.height > 0 && r.top >= -5 && r.bottom < 130;
-    };
-    const top = [...document.querySelectorAll('svg')].filter(inHeader);
-    // The logo may be an SVG, an image, or a CSS sprite.
-    const logos = [...document.querySelectorAll('svg, img, i[data-visualcompletion="css-img"], [aria-label="Instagram"]')].filter(inHeader);
-    if (!top.length || !logos.length) return;
-    const width = (el) => el.getBoundingClientRect().width;
-    const logo = logos.reduce((a, b) => (width(b) > width(a) ? b : a));
-    if (width(logo) < 70) return;
-    const logoRight = logo.getBoundingClientRect().right;
-    const icons = top
-      .filter((svg) => svg !== logo && width(svg) <= 40 && svg.getBoundingClientRect().left > logoRight + 30)
-      .sort((a, b) => a.getBoundingClientRect().left - b.getBoundingClientRect().left);
-    if (icons.length < 2 && !document.querySelector('svg[aria-label="New post"]')) return;
-    // Prefer the + by its label; otherwise by position (the heart is last, + just before it).
-    const labelled = [...document.querySelectorAll('svg[aria-label="New post"], svg[aria-label="Create"]')].find(inHeader);
-    const plus = labelled || icons[icons.length - 2];
-    if (plus.getBoundingClientRect().left < window.innerWidth / 2) return;
+    // Start clean and measure the header as Instagram laid it out. Our own
+    // repositioning is switched off just for the measurement (all in the same
+    // instant, so nothing visibly moves). Measuring the already-moved header is
+    // what sometimes put the heart on the left and the + on the right.
+    ['data-unreel-header', 'data-unreel-brand', 'data-unreel-newpost', 'data-unreel-actions'].forEach((attr) =>
+      document.querySelectorAll(`[${attr}]`).forEach((el) => el.removeAttribute(attr)));
+    html.classList.remove('unreel-feed-header');
+    try {
+      const inHeader = (el) => {
+        if (el.closest('#unreel-tabbar')) return false;
+        const r = el.getBoundingClientRect();
+        return r.height > 0 && r.top >= -5 && r.bottom < 130;
+      };
+      const top = [...document.querySelectorAll('svg')].filter(inHeader);
+      const logos = [...document.querySelectorAll('svg, img, i[data-visualcompletion="css-img"], [aria-label="Instagram"]')].filter(inHeader);
+      if (!top.length || !logos.length) return;
+      const width = (el) => el.getBoundingClientRect().width;
+      const logo = logos.reduce((a, b) => (width(b) > width(a) ? b : a));
+      if (width(logo) < 70) return;
+      const logoRight = logo.getBoundingClientRect().right;
+      const icons = top
+        .filter((svg) => svg !== logo && width(svg) <= 40 && svg.getBoundingClientRect().left > logoRight + 30)
+        .sort((x, y) => x.getBoundingClientRect().left - y.getBoundingClientRect().left);
 
-    // The header row: the closest element that holds both the logo and the +.
-    let row = logo.parentElement;
-    while (row && !row.contains(plus)) row = row.parentElement;
-    if (!row || row === document.body) return;
+      // The heart: by label, else the rightmost icon. The +: by label, else the
+      // icon just left of the heart. They can never be the same element.
+      const heart = icons.find((svg) => HEART_LABEL.test(labelOf(svg))) || icons[icons.length - 1];
+      const plus = icons.find((svg) => PLUS_LABEL.test(labelOf(svg)) && svg !== heart) ||
+        icons.filter((svg) => svg !== heart).pop();
+      if (!plus || !heart || plus === heart) return;
 
-    // The pieces to move: the logo's whole group (logo + dropdown arrow), and
-    // just the + button (not the heart next to it).
-    let brand = logo;
-    while (brand.parentElement && brand.parentElement !== row) brand = brand.parentElement;
-    const plusIcon = plus;
-    // Only the + button itself: climb through its small wrappers, never into the
-    // group that also holds the heart.
-    let newPost = plusIcon;
-    while (newPost.parentElement && newPost.parentElement !== row &&
-           newPost.parentElement.getBoundingClientRect().width <= 56) {
-      newPost = newPost.parentElement;
+      let row = logo.parentElement;
+      while (row && !(row.contains(plus) && row.contains(heart))) row = row.parentElement;
+      if (!row || row === document.body) return;
+
+      let brand = logo;
+      while (brand.parentElement && brand.parentElement !== row) brand = brand.parentElement;
+      // Only the + button itself: its small wrappers, never anything holding the heart.
+      let newPost = plus;
+      while (newPost.parentElement && newPost.parentElement !== row && !newPost.parentElement.contains(heart) &&
+             newPost.parentElement.getBoundingClientRect().width <= 56) {
+        newPost = newPost.parentElement;
+      }
+      if (brand === newPost || newPost.contains(heart)) return;
+      let actions = heart;
+      while (actions.parentElement && actions.parentElement !== row) actions = actions.parentElement;
+
+      row.setAttribute('data-unreel-header', '');
+      brand.setAttribute('data-unreel-brand', '');
+      newPost.setAttribute('data-unreel-newpost', '');
+      if (actions !== brand && actions !== newPost) actions.setAttribute('data-unreel-actions', '');
+    } finally {
+      html.classList.add('unreel-feed-header');
     }
-    if (brand === newPost) return;
-
-    // The group on the right that holds the heart: keep it pinned right once the
-    // logo is taken out of the row's flow (otherwise it slides to the left).
-    let actions = plus;
-    while (actions.parentElement && actions.parentElement !== row) actions = actions.parentElement;
-
-    row.setAttribute('data-unreel-header', '');
-    brand.setAttribute('data-unreel-brand', '');
-    newPost.setAttribute('data-unreel-newpost', '');
-    if (actions !== brand && actions !== newPost) actions.setAttribute('data-unreel-actions', '');
   }
+
 
   // ---- Haptic when double-tapping a message to react ----------------------
   // Instagram reacts with a heart when you double-tap a message; the app gives a
@@ -1334,8 +1346,11 @@
   // Ads can't be recognised by CSS (it can't read the word "Sponsored"), so a
   // small script marks them once and the same CSS hides them.
 
+  // Ways to recognise a Reel, including before its video has loaded (the play
+  // button and the Reels badge Instagram draws on video posts).
   const REEL_MARKERS = ['video', 'a[href*="/reel/"]', '[aria-label="Toggle audio"]',
-    'svg[aria-label="Audio is muted"]', 'svg[aria-label="Audio is playing"]'];
+    'svg[aria-label="Audio is muted"]', 'svg[aria-label="Audio is playing"]',
+    'svg[aria-label="Play"]', 'svg[aria-label="Clip"]', 'svg[aria-label="Reel"]', 'svg[aria-label="Reels"]'];
   const REEL_POST = (prefix) => REEL_MARKERS
     .map((m) => `${prefix} article:not([data-unreel-seen]):has(${m})`).join(',\n');
   // Also hide the wrapper(s) that hold nothing but that post, so no gap is left.
@@ -1362,11 +1377,26 @@
   }
 
   // Marks posts that have been on screen, so they're never hidden afterwards.
+  // A post only counts as "seen" once it has stayed on screen for 0.7 s. When you
+  // fling past posts quickly, a Reel whose video hadn't loaded yet used to get
+  // marked "seen" in passing and was then never hidden.
+  const seenTimers = new WeakMap();
   const seenObserver = 'IntersectionObserver' in window ? new IntersectionObserver((entries) => {
     for (const e of entries) {
+      const post = e.target;
       if (e.isIntersecting && e.boundingClientRect.height > 0) {
-        e.target.setAttribute('data-unreel-seen', '');
-        seenObserver.unobserve(e.target);
+        if (!seenTimers.has(post)) {
+          seenTimers.set(post, setTimeout(() => {
+            seenTimers.delete(post);
+            if (post.isConnected && post.getBoundingClientRect().height > 0) {
+              post.setAttribute('data-unreel-seen', '');
+              seenObserver.unobserve(post);
+            }
+          }, 700));
+        }
+      } else if (seenTimers.has(post)) {
+        clearTimeout(seenTimers.get(post));
+        seenTimers.delete(post);
       }
     }
   }) : null;
@@ -1531,9 +1561,29 @@
     }, 250);
   }
 
+  // During a fast fling there's no "stopped" moment, so also watch while moving:
+  // if you're far past the last real post (a full screen of nothing) and that
+  // stays true for 0.8 s with no new post appearing, the feed ends right there.
+  // (The wait means posts that are merely still being drawn aren't cut off.)
+  let blankSince = 0;
+  let blankLastPost = null;
+  let flingCheckAt = 0;
+  function checkWhileFlinging(sc) {
+    const now = performance.now();
+    if (now - flingCheckAt < 120) return;
+    flingCheckAt = now;
+    const post = lastShownPost();
+    if (!post) return;
+    const farPast = pageY(sc, window.innerHeight) > pageY(sc, post.getBoundingClientRect().bottom) + window.innerHeight;
+    if (!farPast) { blankSince = 0; return; }
+    if (!blankSince || post !== blankLastPost) { blankSince = now; blankLastPost = post; return; }
+    if (now - blankSince > 800) endFeed(sc);
+  }
+
   document.addEventListener('scroll', (e) => {
     if (location.pathname !== '/' || feedEnded) return;
     feedScroller = scrollerOf(e.target);
+    checkWhileFlinging(feedScroller);
     scheduleEndCheck();
   }, { capture: true, passive: true });
 
@@ -1954,6 +2004,7 @@
   function feedSnapshot() {
     const out = [];
     const sc = feedScroller || scrollerOf(null);
+    out.push(`feed: ${location.pathname}${location.search || ''} | following setting: ${cfg.followingFeed} | build js: feed-css`);
     out.push(`viewport ${window.innerWidth}x${window.innerHeight} | scroller ${sc.tagName}${isDocScroller(sc) ? ' (page)' : ''} top=${Math.round(sc.scrollTop)} height=${sc.scrollHeight}`);
     const describe = (el) => {
       const cs = getComputedStyle(el);
@@ -2018,10 +2069,63 @@
     return countHearts(row);
   }
 
+  // Instagram's hover actions for a message (React / Reply / More) appear next to
+  // the bubble. Find its "React" button by label, at the bubble's height.
+  function findReactButton(target) {
+    const box = target.getBoundingClientRect();
+    let best = null;
+    let bestDist = Infinity;
+    for (const el of document.querySelectorAll('[aria-label]')) {
+      if (!/react|emoji|add reaction/i.test(el.getAttribute('aria-label') || '')) continue;
+      const r = el.getBoundingClientRect();
+      if (!r.width || !r.height) continue;
+      const cy = (r.top + r.bottom) / 2;
+      if (cy < box.top - 60 || cy > box.bottom + 60) continue;   // must be beside this message
+      const dist = Math.min(Math.abs(r.left - box.right), Math.abs(box.left - r.right));
+      if (dist < bestDist) { best = el; bestDist = dist; }
+    }
+    return best;
+  }
+
+  function findPickerHeart() {
+    return [...document.querySelectorAll('[role="dialog"] *, [role="menu"] *, [role="listbox"] *, [role="tooltip"] *, [role="toolbar"] *')]
+      .find((el) => el.getBoundingClientRect().height > 0 &&
+        ((!el.childElementCount && /^\s*\u2764\ufe0f?\s*$/.test(el.textContent)) ||
+         /red heart|\u2764/i.test((el.getAttribute && el.getAttribute('aria-label')) || '')));
+  }
+
+  // Use the message's React button, then the heart. Picking the heart again when
+  // you've already hearted a message removes it, exactly as in the app.
+  async function toggleHeartViaPicker(target, x, y) {
+    for (let el = target, i = 0; el && i < 6; el = el.parentElement, i++) {
+      for (const type of ['pointerover', 'pointerenter', 'mouseover', 'mouseenter', 'mousemove']) {
+        el.dispatchEvent(new MouseEvent(type, { bubbles: type !== 'mouseenter' && type !== 'pointerenter', cancelable: true, view: window, clientX: x, clientY: y }));
+      }
+    }
+    let button = null;
+    await waitFor(() => !!(button = findReactButton(target)), 800);
+    if (!button) return false;
+    if (!pressViaReact(button)) fire(button);
+    let heart = null;
+    await waitFor(() => !!(heart = findPickerHeart()), 1200);
+    if (!heart) return false;
+    if (!pressViaReact(heart, 120)) fire(heart.closest('button, [role="button"]') || heart);
+    return true;
+  }
+
   async function reactWithHeart(target, x, y) {
     const before = heartsNear(target);
+    const changed = () => heartsNear(target) !== before;
+
+    if (before > 0) {
+      // Already hearted: double-tap removes it.
+      await toggleHeartViaPicker(target, x, y);
+      if (await waitFor(changed, 900)) haptic('light');
+      return;
+    }
+
+    // 1. Instagram's own double-click handler on the message, if it has one.
     const opts = { bubbles: true, cancelable: true, view: window, clientX: x, clientY: y, detail: 2 };
-    // 1. Instagram's own double-click handler, if the message has one.
     for (let node = target, i = 0; node && i < 14; node = node.parentElement, i++) {
       const props = reactProps(node);
       if (props && typeof props.onDoubleClick === 'function') {
@@ -2033,31 +2137,14 @@
         break;
       }
     }
-    // 2. Otherwise, a double-click event on the message itself.
-    if (!(await waitFor(() => heartsNear(target) > before, 350))) target.dispatchEvent(new MouseEvent('dblclick', opts));
-    if (await waitFor(() => heartsNear(target) > before, 500)) { haptic('medium'); return; }
-
-    // 3. Last resort: Instagram's own "React" button on that message, then the heart.
-    const row = target.closest('[role="row"], [role="gridcell"], [role="listitem"]') ||
-      (target.parentElement && target.parentElement.parentElement && target.parentElement.parentElement.parentElement) || target;
-    for (const type of ['pointerover', 'pointerenter', 'mouseover', 'mouseenter', 'mousemove']) {
-      row.dispatchEvent(new MouseEvent(type, { bubbles: true, cancelable: true, view: window, clientX: x, clientY: y }));
-    }
-    const reactButton = await (async () => {
-      let found = null;
-      await waitFor(() => !!(found = [...row.querySelectorAll('svg[aria-label], [aria-label]')]
-        .find((el) => /react/i.test(el.getAttribute('aria-label') || ''))), 700);
-      return found;
-    })();
-    if (!reactButton) return;
-    if (!pressViaReact(reactButton)) fire(reactButton);
-    let heart = null;
-    await waitFor(() => !!(heart = [...document.querySelectorAll('[role="dialog"] *, [role="menu"] *, [role="listbox"] *, [role="tooltip"] *')]
-      .find((el) => (!el.childElementCount && /^\s*\u2764\ufe0f?\s*$/.test(el.textContent)) ||
-                    /red heart|\u2764/i.test((el.getAttribute && el.getAttribute('aria-label')) || ''))), 1200);
-    if (!heart) return;
-    if (!pressViaReact(heart, 120)) fire(heart.closest('button, [role="button"]') || heart);
-    if (await waitFor(() => heartsNear(target) > before, 800)) haptic('medium');
+    if (await waitFor(changed, 250)) { haptic('medium'); return; }
+    // 2. A double-click event on the message.
+    target.dispatchEvent(new MouseEvent('dblclick', opts));
+    if (await waitFor(changed, 250)) { haptic('medium'); return; }
+    // 3. The message's React button, then the heart (this is the one that works
+    //    for shared reels and posts on Instagram's site).
+    await toggleHeartViaPicker(target, x, y);
+    if (await waitFor(changed, 900)) haptic('medium');
   }
 
   // Taps on shared reels/posts in a chat: Instagram may open them on the "finger
