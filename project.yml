@@ -19,6 +19,7 @@ targets:
         CADisableMinimumFrameDurationOnPhone: true
         NSCameraUsageDescription: Take a photo to send in a chat.
         NSMicrophoneUsageDescription: Record voice messages in chats.
+        NSPhotoLibraryAddUsageDescription: Save photos and videos you long-press to your library.
         UIBackgroundModes: [audio, fetch, processing]
         BGTaskSchedulerPermittedIdentifiers: [com.yourname.unreel.refresh, com.yourname.unreel.processing]
         CFBundleURLTypes:
