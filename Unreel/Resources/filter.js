@@ -1242,7 +1242,7 @@
     html.classList.remove('unreel-feed-header');
     try {
       const inHeader = (el) => {
-        if (el.closest('#unreel-tabbar')) return false;
+        if (el.closest('#unreel-tabbar, #unreel-fake-header')) return false;
         const r = el.getBoundingClientRect();
         return r.height > 0 && r.top >= -5 && r.bottom < 130;
       };
@@ -1284,6 +1284,7 @@
       brand.setAttribute('data-unreel-brand', '');
       newPost.setAttribute('data-unreel-newpost', '');
       if (actions !== brand && actions !== newPost) actions.setAttribute('data-unreel-actions', '');
+      saveHeaderLook(row, logo, plus, heart);
     } finally {
       html.classList.add('unreel-feed-header');
     }
@@ -2284,7 +2285,94 @@
   function updateFollowingFeed() {
     if (!cfg.followingFeed || location.pathname !== '/' || onFollowingFeed()) return;
     if (followTriedFor === location.href) return;   // one attempt per visit
+    try {
+      if (sessionStorage.getItem('unreel-skip-following')) {   // you tapped + : stay here for New Post
+        sessionStorage.removeItem('unreel-skip-following');
+        followTriedFor = location.href;
+        return;
+      }
+    } catch (_) {}
     switchToFollowing();
+  }
+
+  // ---- Following feed: same top bar as the normal feed ---------------------------
+  // Instagram's Following feed has its own top bar ("Following" with a back
+  // arrow). Unreel keeps a copy of the normal feed's logo, + and heart (saved
+  // whenever the normal feed is shown) and draws that bar over the Following
+  // feed's own, which stays in place but invisible so nothing shifts.
+  const HEADER_KEY = 'unreel-header-look-v1';
+  function saveHeaderLook(row, logo, plus, heart) {
+    try {
+      const heartLink = heart.closest('a[href]');
+      const brand = logo.closest('[data-unreel-brand]') || logo;
+      const look = {
+        logo: brand.innerHTML, plus: plus.outerHTML, heart: heart.outerHTML,
+        heartHref: heartLink ? heartLink.getAttribute('href') : '',
+        height: Math.round(row.getBoundingClientRect().height),
+      };
+      const json = JSON.stringify(look);
+      if (localStorage.getItem(HEADER_KEY) !== json) localStorage.setItem(HEADER_KEY, json);
+    } catch (_) {}
+  }
+  const savedHeaderLook = () => { try { return JSON.parse(localStorage.getItem(HEADER_KEY)); } catch (_) { return null; } };
+
+  // Instagram's own top bar on the Following feed.
+  function followingTopBar() {
+    const back = [...document.querySelectorAll('svg[aria-label="Back"], [aria-label="Back"]')]
+      .find((el) => { const r = el.getBoundingClientRect(); return r.height > 0 && r.top < 130; });
+    const title = [...document.querySelectorAll('h1, h2, span, div')]
+      .find((el) => !el.childElementCount && /^following$/i.test(el.textContent.trim()) &&
+        el.getBoundingClientRect().top < 130 && el.getBoundingClientRect().height > 0);
+    const anchor = back || title;
+    if (!anchor) return null;
+    let bar = anchor;
+    for (let el = anchor.parentElement; el && el !== document.body; el = el.parentElement) {
+      const r = el.getBoundingClientRect();
+      if (r.width >= window.innerWidth * 0.95 && r.height < 120) bar = el; else if (bar !== anchor) break;
+    }
+    return bar === anchor ? null : bar;
+  }
+
+  function updateFollowingHeader() {
+    const want = location.pathname === '/' && onFollowingFeed();
+    let fake = document.getElementById('unreel-fake-header');
+    if (!want) {
+      if (fake) fake.remove();
+      document.querySelectorAll('[data-unreel-ig-header]').forEach((el) => el.removeAttribute('data-unreel-ig-header'));
+      return;
+    }
+    const look = savedHeaderLook();
+    const bar = followingTopBar();
+    if (!look || !bar) return;
+    if (!bar.hasAttribute('data-unreel-ig-header')) bar.setAttribute('data-unreel-ig-header', '');
+    const r = bar.getBoundingClientRect();
+    if (!fake) {
+      fake = document.createElement('div');
+      fake.id = 'unreel-fake-header';
+      fake.innerHTML = `<div class="uh-plus">${look.plus}</div><div class="uh-logo">${look.logo}</div><div class="uh-heart">${look.heart}</div>`;
+      fake.querySelector('.uh-plus').addEventListener('click', (e) => {
+        e.preventDefault(); e.stopPropagation();
+        // New post: the + lives on the normal feed, so go there once and open it.
+        try { sessionStorage.setItem('unreel-skip-following', '1'); } catch (_) {}
+        navigateTo('/');
+        setTimeout(() => window.__unreel && window.__unreel.newPost(), 700);
+      });
+      fake.querySelector('.uh-heart').addEventListener('click', (e) => {
+        e.preventDefault(); e.stopPropagation();
+        haptic('selection');
+        navigateTo(look.heartHref || '/notifications/');
+      });
+      fake.querySelector('.uh-logo').addEventListener('click', (e) => {
+        e.preventDefault(); e.stopPropagation();
+        const sc = feedScroller || document.scrollingElement;
+        sc.scrollTo({ top: 0, behavior: 'smooth' });
+      });
+      document.body.appendChild(fake);
+    }
+    fake.style.top = `${Math.max(0, r.top)}px`;
+    fake.style.height = `${Math.round(r.height || look.height || 56)}px`;
+    fake.style.background = pageBg();
+    fake.style.color = isDarkColor(pageBg()) ? '#f5f5f5' : '#000';
   }
 
   // ---- Long-press menu: save media, full-size profile picture, copy text -----------
@@ -2529,6 +2617,182 @@
     menuContext = null;
   }
 
+  // ---- Comments sheet, like the app ----------------------------------------------
+  // Tapping the comment button on a reel or post opens a sheet over the bottom
+  // part of the screen: the reel keeps playing and stays visible above it, the
+  // comments scroll inside the sheet, and the most-liked comments come first.
+  // You can like comments and post your own from the bar at the bottom.
+  const IG_HEADERS = { 'x-ig-app-id': '936619743392459', 'x-requested-with': 'XMLHttpRequest' };
+  const csrfToken = () => (document.cookie.match(/(?:^|;\s*)csrftoken=([^;]+)/) || [])[1] || '';
+  const esc = (t) => String(t == null ? '' : t).replace(/[&<>"']/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
+  const ago = (sec) => {
+    const d = Math.max(0, Date.now() / 1000 - sec);
+    if (d < 60) return 'now';
+    if (d < 3600) return Math.floor(d / 60) + 'm';
+    if (d < 86400) return Math.floor(d / 3600) + 'h';
+    if (d < 604800) return Math.floor(d / 86400) + 'd';
+    return Math.floor(d / 604800) + 'w';
+  };
+
+  let commentsState = null;   // { id, items, next, loading }
+
+  async function loadComments(more) {
+    const st = commentsState;
+    if (!st || st.loading || (more && !st.next)) return;
+    st.loading = true;
+    try {
+      const q = `can_support_threading=true&sort_order=popular${more && st.next ? '&min_id=' + encodeURIComponent(st.next) : ''}`;
+      const res = await realFetch(`/api/v1/media/${st.id}/comments/?${q}`, { credentials: 'include', headers: IG_HEADERS });
+      const data = await res.json();
+      const items = (data && data.comments) || [];
+      const seen = new Set(st.items.map((c) => String(c.pk)));
+      st.items.push(...items.filter((c) => !seen.has(String(c.pk))));
+      st.next = data && data.has_more_comments ? (data.next_min_id || data.next_max_id || null) : null;
+      // Most-liked first (ties: newest first).
+      st.items.sort((a, b) => (b.comment_like_count || 0) - (a.comment_like_count || 0) || (b.created_at || 0) - (a.created_at || 0));
+      renderComments();
+    } catch (_) {
+      const list = document.querySelector('#unreel-comments .uc-list');
+      if (list && !st.items.length) list.innerHTML = '<div class="uc-empty">Couldn\u2019t load comments.</div>';
+    } finally {
+      st.loading = false;
+    }
+  }
+
+  function renderComments() {
+    const sheet = document.getElementById('unreel-comments');
+    if (!sheet || !commentsState) return;
+    const list = sheet.querySelector('.uc-list');
+    if (!commentsState.items.length) { list.innerHTML = '<div class="uc-empty">No comments yet.</div>'; return; }
+    list.innerHTML = commentsState.items.map((c) => {
+      const u = c.user || {};
+      const likes = c.comment_like_count || 0;
+      const replies = c.child_comment_count || 0;
+      return `<div class="uc-item" data-pk="${esc(c.pk)}">
+        <img class="uc-avatar" src="${esc(u.profile_pic_url)}" alt="">
+        <div class="uc-body">
+          <div class="uc-meta"><b>${esc(u.username)}</b> <span>${ago(c.created_at)}</span></div>
+          <div class="uc-text">${esc(c.text)}</div>
+          <div class="uc-sub">${likes ? likes.toLocaleString() + (likes === 1 ? ' like' : ' likes') : ''}${replies ? `<span>${replies} ${replies === 1 ? 'reply' : 'replies'}</span>` : ''}</div>
+        </div>
+        <button type="button" class="uc-like${c.has_liked_comment ? ' on' : ''}" aria-label="Like comment">${c.has_liked_comment ? '\u2665' : '\u2661'}</button>
+      </div>`;
+    }).join('');
+  }
+
+  async function toggleCommentLike(btn) {
+    const item = btn.closest('.uc-item');
+    const c = commentsState && commentsState.items.find((x) => String(x.pk) === item.getAttribute('data-pk'));
+    if (!c) return;
+    const liking = !c.has_liked_comment;
+    c.has_liked_comment = liking;
+    c.comment_like_count = Math.max(0, (c.comment_like_count || 0) + (liking ? 1 : -1));
+    haptic(liking ? 'medium' : 'light');
+    renderComments();
+    try {
+      await realFetch(`/api/v1/web/comments/${liking ? 'like' : 'unlike'}/${c.pk}/`, {
+        method: 'POST', credentials: 'include',
+        headers: { ...IG_HEADERS, 'x-csrftoken': csrfToken(), 'content-type': 'application/x-www-form-urlencoded' },
+      });
+    } catch (_) {}
+  }
+
+  async function postComment(input) {
+    const text = input.value.trim();
+    if (!text || !commentsState) return;
+    input.value = '';
+    input.blur();
+    try {
+      const res = await realFetch(`/api/v1/web/comments/${commentsState.id}/add/`, {
+        method: 'POST', credentials: 'include',
+        headers: { ...IG_HEADERS, 'x-csrftoken': csrfToken(), 'content-type': 'application/x-www-form-urlencoded' },
+        body: 'comment_text=' + encodeURIComponent(text),
+      });
+      const data = await res.json().catch(() => ({}));
+      if (data && data.id) {
+        haptic('light');
+        commentsState.items.unshift({ pk: data.id, text, created_at: Date.now() / 1000, comment_like_count: 0,
+          user: { username: (data.from && data.from.username) || 'You', profile_pic_url: data.from && data.from.profile_picture } });
+        renderComments();
+        return;
+      }
+    } catch (_) {}
+    input.value = text;
+    showToast('Couldn\u2019t post your comment');
+  }
+
+  function closeComments() {
+    const sheet = document.getElementById('unreel-comments');
+    if (!sheet) return;
+    sheet.classList.remove('show');
+    setTimeout(() => sheet.remove(), 260);
+    commentsState = null;
+  }
+
+  function openComments(id) {
+    closeComments();
+    document.getElementById('unreel-comments')?.remove();
+    commentsState = { id, items: [], next: null, loading: false };
+    const sheet = document.createElement('div');
+    sheet.id = 'unreel-comments';
+    sheet.innerHTML = `<div class="uc-backdrop"></div><div class="uc-panel">
+      <div class="uc-grab"></div><div class="uc-title">Comments</div>
+      <div class="uc-list"><div class="uc-empty">Loading\u2026</div></div>
+      <form class="uc-bar"><input type="text" placeholder="Add a comment\u2026" enterkeyhint="send"><button type="submit">Post</button></form>
+    </div>`;
+    sheet.querySelector('.uc-backdrop').addEventListener('click', closeComments);
+    const list = sheet.querySelector('.uc-list');
+    list.addEventListener('scroll', () => {
+      if (list.scrollTop + list.clientHeight > list.scrollHeight - 300) loadComments(true);
+    }, { passive: true });
+    list.addEventListener('click', (e) => {
+      const btn = e.target.closest && e.target.closest('.uc-like');
+      if (btn) { e.preventDefault(); toggleCommentLike(btn); }
+    });
+    sheet.querySelector('.uc-bar').addEventListener('submit', (e) => { e.preventDefault(); postComment(sheet.querySelector('.uc-bar input')); });
+    // Drag the grab bar / title down to close.
+    let startY = null;
+    const panel = sheet.querySelector('.uc-panel');
+    const head = [sheet.querySelector('.uc-grab'), sheet.querySelector('.uc-title')];
+    head.forEach((h) => {
+      h.addEventListener('touchstart', (e) => { startY = e.touches[0].clientY; panel.style.transition = 'none'; }, { passive: true });
+      h.addEventListener('touchmove', (e) => {
+        if (startY === null) return;
+        panel.style.transform = `translateY(${Math.max(0, e.touches[0].clientY - startY)}px)`;
+      }, { passive: true });
+      h.addEventListener('touchend', (e) => {
+        const dy = (e.changedTouches[0] || {}).clientY - startY;
+        panel.style.transition = '';
+        panel.style.transform = '';
+        startY = null;
+        if (dy > 90) closeComments();
+      }, { passive: true });
+    });
+    panel.style.color = isDarkColor(pageBg()) ? '#f5f5f5' : '#000';
+    panel.style.background = pageBg();
+    document.body.appendChild(sheet);
+    requestAnimationFrame(() => sheet.classList.add('show'));
+    loadComments(false);
+  }
+
+  // Comment buttons on reels and posts open the sheet instead of a new page.
+  window.addEventListener('click', (e) => {
+    if (!e.isTrusted) return;
+    const t = e.target.closest ? e.target : e.target.parentElement;
+    const icon = t && (t.closest('svg[aria-label="Comment"]') || (t.querySelector && t.querySelector('svg[aria-label="Comment"]')));
+    if (!icon || icon.getBoundingClientRect().width > 60) return;
+    const scope = icon.closest('article') || icon.closest('[role="dialog"]') || (viewerVideo() ? document : null);
+    if (!scope) return;
+    const media = (scope === document ? viewerVideo() : mediaForMenu(icon)) || null;
+    const code = media && shortcodeFor(media);
+    const id = mediaIdFromReact(icon) || (media && mediaIdFromReact(media)) || (code && shortcodeToId(code));
+    if (!id) return;   // can't tell which post: let Instagram handle it
+    e.preventDefault();
+    e.stopImmediatePropagation();
+    haptic('selection');
+    openComments(id);
+  }, true);
+
   // ---- Actions the app can trigger (Home Screen quick actions) ----------------
 
   window.__unreel = {
@@ -2603,6 +2867,33 @@
     'article button[aria-label="Next"], article button[aria-label="Go back"], article button[aria-label="Go Back"], article [role="button"][aria-label="Next"], article [role="button"][aria-label="Go back"], article [role="button"][aria-label="Go Back"] { display: none !important; }',
     // While Unreel taps React -> heart for you, keep that picker out of sight.
     '.unreel-reacting [role="dialog"], .unreel-reacting [role="menu"], .unreel-reacting [role="toolbar"], .unreel-reacting [role="tooltip"], .unreel-reacting [role="listbox"] { opacity: 0 !important; }',
+    // Following feed: Instagram's own top bar stays (no shifting) but is invisible
+    // under Unreel's copy of the normal feed's bar.
+    '[data-unreel-ig-header] { visibility: hidden !important; }',
+    '#unreel-fake-header { position: fixed; left: 0; right: 0; z-index: 2147482000; display: flex; align-items: center; justify-content: space-between; padding: 0 16px; box-sizing: border-box; }',
+    '#unreel-fake-header .uh-logo { position: absolute; left: 50%; top: 50%; transform: translate(-50%, -50%) scale(1.1); display: flex; align-items: center; gap: 6px; }',
+    '#unreel-fake-header .uh-plus, #unreel-fake-header .uh-heart { display: flex; align-items: center; padding: 6px; margin: -6px; }',
+    '#unreel-fake-header svg { color: inherit; }',
+    // Comments sheet: covers the bottom part only, so the reel stays visible and playing.
+    '#unreel-comments { position: fixed; inset: 0; z-index: 2147483500; pointer-events: none; }',
+    '#unreel-comments .uc-backdrop { position: absolute; inset: 0; pointer-events: auto; }',
+    '#unreel-comments .uc-panel { position: absolute; left: 0; right: 0; bottom: 0; height: 62%; display: flex; flex-direction: column; border-radius: 16px 16px 0 0; background: var(--unreel-page-bg, #fff); color: inherit; pointer-events: auto; transform: translateY(100%); transition: transform .26s cubic-bezier(.2,.8,.2,1); box-shadow: 0 -6px 24px rgba(0,0,0,0.25); }',
+    '#unreel-comments.show .uc-panel { transform: none; }',
+    '#unreel-comments .uc-grab { width: 38px; height: 5px; border-radius: 3px; background: rgba(127,127,127,0.45); margin: 8px auto 4px; flex: none; }',
+    '#unreel-comments .uc-title { text-align: center; font: 600 15px -apple-system, system-ui, sans-serif; padding: 6px 0 10px; border-bottom: 0.5px solid rgba(127,127,127,0.25); flex: none; }',
+    '#unreel-comments .uc-list { flex: 1; overflow-y: auto; -webkit-overflow-scrolling: touch; overscroll-behavior: contain; padding: 6px 0; }',
+    '#unreel-comments .uc-item { display: flex; gap: 10px; padding: 10px 14px; align-items: flex-start; font: 14px -apple-system, system-ui, sans-serif; }',
+    '#unreel-comments .uc-avatar { width: 34px; height: 34px; border-radius: 50%; object-fit: cover; flex: none; }',
+    '#unreel-comments .uc-body { flex: 1; min-width: 0; }',
+    '#unreel-comments .uc-meta span, #unreel-comments .uc-sub { opacity: 0.6; font-size: 12.5px; }',
+    '#unreel-comments .uc-text { margin: 2px 0 4px; white-space: pre-wrap; word-wrap: break-word; -webkit-user-select: text; user-select: text; }',
+    '#unreel-comments .uc-sub span { margin-left: 12px; }',
+    '#unreel-comments .uc-like { border: 0; background: none; color: inherit; font-size: 15px; padding: 4px; flex: none; }',
+    '#unreel-comments .uc-like.on { color: #ff3040; }',
+    '#unreel-comments .uc-empty { text-align: center; opacity: 0.6; padding: 30px; font: 14px -apple-system, system-ui, sans-serif; }',
+    '#unreel-comments .uc-bar { display: flex; gap: 8px; padding: 8px 12px calc(8px + env(safe-area-inset-bottom, 0px)); border-top: 0.5px solid rgba(127,127,127,0.25); flex: none; }',
+    '#unreel-comments .uc-bar input { flex: 1; border: 0; border-radius: 18px; padding: 9px 14px; font-size: 16px; color: inherit; background: rgba(127,127,127,0.15); outline: none; -webkit-user-select: text; user-select: text; }',
+    '#unreel-comments .uc-bar button { border: 0; background: none; color: #0095f6; font: 600 15px -apple-system, system-ui, sans-serif; }',
     // Peek banner and toast.
     '#unreel-peek { position: fixed; left: 50%; transform: translateX(-50%); z-index: 2147483001; display: flex; align-items: center; gap: 10px; padding: 7px 8px 7px 14px; border-radius: 999px; font-size: 13px; font-weight: 600; color: #fff; background: rgba(40,40,46,0.92); box-shadow: 0 4px 16px rgba(0,0,0,0.25); white-space: nowrap; }',
     '#unreel-peek button { border: 0; border-radius: 999px; padding: 5px 10px; font: inherit; font-size: 12px; color: #000; background: #fff; }',
@@ -2708,6 +2999,7 @@
     updateHeader();
     addSaveToMenu();
     updateFollowingFeed();
+    updateFollowingHeader();
     updateInboxStatus();
     updatePeek();
 
