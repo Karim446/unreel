@@ -634,6 +634,13 @@
 
   const isLiked = (icon) => !!icon && icon.getAttribute('aria-label') === 'Unlike';
 
+  // Like waitFor, but checks every ~30 ms (used where speed is noticeable).
+  const waitFast = async (test, ms) => {
+    const end = performance.now() + ms;
+    while (performance.now() < end) { if (test()) return true; await sleep(30); }
+    return test();
+  };
+
   const waitFor = async (test, ms) => {
     for (let t = 0; t < ms; t += 100) { if (test()) return true; await sleep(100); }
     return test();
@@ -1530,6 +1537,8 @@
   }
 
   function unendFeed() {
+    if (softClip) { softClip.removeAttribute('data-unreel-soft'); softClip = null; }
+    document.documentElement.style.removeProperty('--unreel-soft-h');
     feedEnded = false;
     feedEndY = 0;
     document.documentElement.classList.remove('unreel-feed-end');
@@ -1561,6 +1570,28 @@
     }, 250);
   }
 
+  // A moving safety limit: the feed is never allowed to extend more than about a
+  // screen and a half past the last real post. Real posts arriving extend it;
+  // empty space can't build up, so even the fastest fling stops right after the
+  // content instead of flying through blank space before the end is detected.
+  let softClip = null;
+  let softAt = 0;
+  function updateSoftLimit(sc, force) {
+    if (feedEnded || location.pathname !== '/') return;
+    const now = performance.now();
+    if (!force && now - softAt < 250) return;
+    softAt = now;
+    const post = lastShownPost();
+    if (!post) return;
+    const clip = feedContainer(post, sc);
+    if (softClip && softClip !== clip) softClip.removeAttribute('data-unreel-soft');
+    softClip = clip;
+    const clipTop = pageY(sc, clip.getBoundingClientRect().top);
+    const limit = pageY(sc, post.getBoundingClientRect().bottom) + window.innerHeight * 1.5;
+    clip.setAttribute('data-unreel-soft', '');
+    document.documentElement.style.setProperty('--unreel-soft-h', `${Math.max(window.innerHeight * 2, limit - clipTop)}px`);
+  }
+
   // During a fast fling there's no "stopped" moment, so also watch while moving:
   // if you're far past the last real post (a full screen of nothing) and that
   // stays true for 0.8 s with no new post appearing, the feed ends right there.
@@ -1583,6 +1614,7 @@
   document.addEventListener('scroll', (e) => {
     if (location.pathname !== '/' || feedEnded) return;
     feedScroller = scrollerOf(e.target);
+    updateSoftLimit(feedScroller, false);
     checkWhileFlinging(feedScroller);
     scheduleEndCheck();
   }, { capture: true, passive: true });
@@ -2065,9 +2097,18 @@
   }
 
   function heartsNear(el) {
-    const row = el.closest('[role="row"], [role="gridcell"], [role="listitem"]') || el.parentElement && el.parentElement.parentElement && el.parentElement.parentElement.parentElement || document.body;
-    return countHearts(row);
+    const box = el.getBoundingClientRect();
+    let n = 0;
+    for (const h of document.querySelectorAll('img[alt="❤"], img[alt="❤️"], span, div')) {
+      if (h.childElementCount || h.closest('[role="dialog"], [role="menu"], [role="toolbar"], [role="tooltip"]')) continue;
+      if (!/^\s*(❤️?|♥️?)\s*\d*\s*$/.test(h.textContent || h.alt || '')) continue;
+      const r = h.getBoundingClientRect();
+      // Just under or overlapping the bottom of this message.
+      if (r.width && r.top >= box.top && r.top <= box.bottom + 40 && r.right >= box.left - 30 && r.left <= box.right + 30) n++;
+    }
+    return n;
   }
+
 
   // Instagram's hover actions for a message (React / Reply / More) appear next to
   // the bubble. Find its "React" button by label, at the bubble's height.
@@ -2097,34 +2138,38 @@
   // Use the message's React button, then the heart. Picking the heart again when
   // you've already hearted a message removes it, exactly as in the app.
   async function toggleHeartViaPicker(target, x, y) {
+    document.documentElement.classList.add('unreel-reacting');
+    try { return await pickHeart(target, x, y); } finally {
+      setTimeout(() => document.documentElement.classList.remove('unreel-reacting'), 150);
+    }
+  }
+
+  async function pickHeart(target, x, y) {
     for (let el = target, i = 0; el && i < 6; el = el.parentElement, i++) {
       for (const type of ['pointerover', 'pointerenter', 'mouseover', 'mouseenter', 'mousemove']) {
         el.dispatchEvent(new MouseEvent(type, { bubbles: type !== 'mouseenter' && type !== 'pointerenter', cancelable: true, view: window, clientX: x, clientY: y }));
       }
     }
     let button = null;
-    await waitFor(() => !!(button = findReactButton(target)), 800);
+    await waitFast(() => !!(button = findReactButton(target)), 800);
     if (!button) return false;
     if (!pressViaReact(button)) fire(button);
     let heart = null;
-    await waitFor(() => !!(heart = findPickerHeart()), 1200);
+    await waitFast(() => !!(heart = findPickerHeart()), 1200);
     if (!heart) return false;
     if (!pressViaReact(heart, 120)) fire(heart.closest('button, [role="button"]') || heart);
     return true;
   }
 
   async function reactWithHeart(target, x, y) {
-    const before = heartsNear(target);
-    const changed = () => heartsNear(target) !== before;
-
-    if (before > 0) {
-      // Already hearted: double-tap removes it.
-      await toggleHeartViaPicker(target, x, y);
-      if (await waitFor(changed, 900)) haptic('light');
-      return;
-    }
-
-    // 1. Instagram's own double-click handler on the message, if it has one.
+    // Feedback the moment you double-tap, like the app (not after the heart lands).
+    const removing = heartsNear(target) > 0;
+    haptic(removing ? 'light' : 'medium');
+    // Shared reels/posts: Instagram's React button + heart is what works, so go
+    // straight there (the double-click attempts only added delay). Picking the
+    // heart on an already-hearted message removes it.
+    if (await toggleHeartViaPicker(target, x, y)) return;
+    // No React button found: fall back to Instagram's double-click reaction.
     const opts = { bubbles: true, cancelable: true, view: window, clientX: x, clientY: y, detail: 2 };
     for (let node = target, i = 0; node && i < 14; node = node.parentElement, i++) {
       const props = reactProps(node);
@@ -2134,18 +2179,12 @@
             clientX: x, clientY: y, detail: 2, button: 0, preventDefault() {}, stopPropagation() {},
             isDefaultPrevented: () => false, isPropagationStopped: () => false, persist() {} });
         } catch (_) {}
-        break;
+        return;
       }
     }
-    if (await waitFor(changed, 250)) { haptic('medium'); return; }
-    // 2. A double-click event on the message.
     target.dispatchEvent(new MouseEvent('dblclick', opts));
-    if (await waitFor(changed, 250)) { haptic('medium'); return; }
-    // 3. The message's React button, then the heart (this is the one that works
-    //    for shared reels and posts on Instagram's site).
-    await toggleHeartViaPicker(target, x, y);
-    if (await waitFor(changed, 900)) haptic('medium');
   }
+
 
   // Taps on shared reels/posts in a chat: Instagram may open them on the "finger
   // lifted" event rather than on the click, so the hold has to start there too.
@@ -2562,6 +2601,8 @@
     '#unreel-viewer button { border: 0; border-radius: 999px; padding: 8px 16px; font: 600 15px -apple-system, system-ui, sans-serif; color: #fff; background: rgba(255,255,255,0.18); }',
     // Multi-photo posts: no left/right arrow buttons, just swipe.
     'article button[aria-label="Next"], article button[aria-label="Go back"], article button[aria-label="Go Back"], article [role="button"][aria-label="Next"], article [role="button"][aria-label="Go back"], article [role="button"][aria-label="Go Back"] { display: none !important; }',
+    // While Unreel taps React -> heart for you, keep that picker out of sight.
+    '.unreel-reacting [role="dialog"], .unreel-reacting [role="menu"], .unreel-reacting [role="toolbar"], .unreel-reacting [role="tooltip"], .unreel-reacting [role="listbox"] { opacity: 0 !important; }',
     // Peek banner and toast.
     '#unreel-peek { position: fixed; left: 50%; transform: translateX(-50%); z-index: 2147483001; display: flex; align-items: center; gap: 10px; padding: 7px 8px 7px 14px; border-radius: 999px; font-size: 13px; font-weight: 600; color: #fff; background: rgba(40,40,46,0.92); box-shadow: 0 4px 16px rgba(0,0,0,0.25); white-space: nowrap; }',
     '#unreel-peek button { border: 0; border-radius: 999px; padding: 5px 10px; font: inherit; font-size: 12px; color: #000; background: #fff; }',
@@ -2573,7 +2614,10 @@
     '[data-unreel-status]::after { content: attr(data-unreel-status); font-size: 14px; opacity: 0.65; }',
     // End of the feed: stop the endless loading once everything left is hidden.
     '.unreel-feed-end [role="progressbar"], .unreel-feed-end [data-visualcompletion="loading-state"], .unreel-feed-end svg[aria-label^="Loading"] { display: none !important; }',
-    '.unreel-feed-end [data-unreel-clip] { max-height: var(--unreel-clip-h) !important; overflow: hidden !important; position: relative !important; }',
+    // overflow: clip (not hidden): hidden turned the feed into its own scroll area,
+    // which broke Instagram's sticky header (the logo bar vanished when scrolling up).
+    '.unreel-feed-end [data-unreel-clip] { max-height: var(--unreel-clip-h) !important; overflow: hidden !important; overflow: clip !important; position: relative !important; }',
+    '.unreel-home:not(.unreel-feed-end) [data-unreel-soft] { max-height: var(--unreel-soft-h) !important; overflow: hidden !important; overflow: clip !important; }',
     '#unreel-caught-up { position: absolute; left: 0; right: 0; bottom: 0; height: 230px; box-sizing: border-box; padding-top: 40px; text-align: center; color: #f5f5f5; opacity: 0; transition: opacity .3s ease; pointer-events: none; }',
     '#unreel-caught-up.show { opacity: 1; }',
     '@media (prefers-color-scheme: light) { #unreel-caught-up { color: #000; } }',
@@ -2628,7 +2672,7 @@
     const path = location.pathname;
 
     resetWallOnNavigate();
-    if (path === '/') { updateFeed(); keepFeedTrimmed(); }
+    if (path === '/') { updateFeed(); keepFeedTrimmed(); updateSoftLimit(feedScroller || scrollerOf(null), false); }
 
     if (scrollingNow()) {
       check(lastPath);
