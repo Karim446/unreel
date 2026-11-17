@@ -1,0 +1,4 @@
+lookup: [ '/api/v1/media/2885213991965480115/info/' ]
+preview src: https://cdn.example/big.jpg
+avatar untouched: https://cdn.example/a.jpg
+errors: []

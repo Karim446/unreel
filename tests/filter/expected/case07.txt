@@ -1,0 +1,5 @@
+newpost = pw | actions = right | brand = left
+r1 states while video swaps: shown,shown,shown,shown,shown,shown
+n1 visible: true
+re-rendered r1 hidden: false
+errors: []

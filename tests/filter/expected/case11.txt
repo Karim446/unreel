@@ -1,0 +1,6 @@
+A: on content, position kept: true
+A: stopped at 3600 (last content around 3000) | card shown: true
+A: after trying to scroll past, position: 9000
+A: errors: []
+B: jumped to 3600 (next posts start at 5200) | card shown: true
+Error: Not implemented: navigation (except hash changes)

@@ -1,0 +1,2 @@
+first setup moves: pw
+after a redraw moves: pw | heart group pinned right: right

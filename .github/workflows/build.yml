@@ -11,6 +11,11 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
+      - name: Check the page scripts parse
+        run: |
+          node --check Unreel/Resources/limits.js
+          node --check Unreel/Resources/filter.js
+
       - name: Install XcodeGen
         run: brew install xcodegen
 

@@ -1,0 +1,2 @@
+their message last -> Seen hidden: true
+your message last  -> Seen shown:  true

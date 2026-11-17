@@ -1,0 +1,5 @@
+on home, html has unreel-home: true
+elements the rules hide: [ 'w2', 'DIV', 'reel', 'w3', 'reellink', 'w5', 'ad' ]
+ad marked: true
+off the home feed, rules inactive: true
+errors: []

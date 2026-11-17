@@ -1,0 +1,4 @@
+normal header saved: true /notifications/
+Following bar hidden: true
+normal-looking bar shown: true | has logo, + and heart: true
+errors: [] []

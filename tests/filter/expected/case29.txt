@@ -1,0 +1,6 @@
+sheet open: true | Instagram page not opened: true
+comments, most-liked first: [ 'best comment', 'ok one', 'meh' ]
+reel still there (playing behind): true
+liked first comment: true [ 'POST /api/v1/web/comments/like/2/' ]
+posted: [ 'POST /api/v1/web/comments/2885213991965480115/add/' ] | shows in list: true
+errors: []

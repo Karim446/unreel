@@ -1,0 +1,5 @@
+bar on feed: true
+bar with sheet open: true
+bar after sheet closed: true
+bar on inbox: true | DM icon filled: true
+errors: []

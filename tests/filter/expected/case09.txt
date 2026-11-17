@@ -1,0 +1,7 @@
+peeked chat, reached server: [
+  'fetch /api/v1/direct_v2/threads/555/',
+  'ws {"tasks":[{"label":"46","payload":"send message"}]}'
+]
+banner shown: true | errors: []
+normal chat, reached server: [ 'fetch /api/v1/direct_v2/threads/777/items/9/seen/' ] | banner: false
+after reload-open, remembered: ["888"] | banner: true

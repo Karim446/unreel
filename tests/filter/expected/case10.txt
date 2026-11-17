@@ -1,0 +1,11 @@
+hideOnline=true: [
+  'ws [bin 16]',
+  'ws {"tasks":[{"label":"46","payload":"hello"}]}',
+  'fetch /api/v1/direct_v2/get_presence/'
+] []
+hideOnline=false: [
+  'ws [bin 16]',
+  'ws [bin 48]',
+  'ws {"tasks":[{"label":"46","payload":"hello"}]}',
+  'fetch /api/v1/direct_v2/get_presence/'
+] []

@@ -2831,6 +2831,8 @@
       return false;
     },
     toast(text) { if (typeof text === 'string') showToast(text); },
+    // Go to another Instagram page without a full reload (used by limits.js).
+    go(href) { if (typeof href === 'string') navigateTo(href); },
     // Data the app fetched for the page.
     setUnread(n) {
       if (typeof n !== 'number' || n === unreadCount) return;

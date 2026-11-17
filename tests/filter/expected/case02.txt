@@ -1,0 +1,7 @@
+caught-up card: false feed-end class: false
+errors: []
+blockReelsTab=true: tabs [ '/', '/explore/', '/direct/inbox/', '/me/' ] errors: []
+blockReelsTab=false: tabs [ '/', '/explore/', '/reels/', '/direct/inbox/', '/me/' ] errors: []
+(inbox test needs shared storage; skipped)
+Error: Not implemented: navigation (except hash changes)
+Error: Not implemented: navigation (except hash changes)

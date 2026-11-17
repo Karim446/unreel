@@ -1,0 +1,2 @@
+fling into blank ends the feed without stopping: true
+errors: []

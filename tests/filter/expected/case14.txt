@@ -1,0 +1,3 @@
+online person has dot: true
+offline person no dot: true
+errors: []

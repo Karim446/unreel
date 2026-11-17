@@ -1,0 +1,4 @@
+React handler: double-tap hearted=true opened=0 haptic=medium errors=[]
+   single tap opens the reel: true
+dblclick listener: double-tap hearted=true opened=0 haptic=medium errors=[]
+   single tap opens the reel: true

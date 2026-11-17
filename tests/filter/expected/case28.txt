@@ -1,0 +1,4 @@
+moving limit on the feed: true 2400px (expected 2400px = last post 1200 + 1.5 screens)
+limit extends for new posts: 3000px (expected 3000px)
+trim keeps the sticky header (overflow: clip): true
+errors: []

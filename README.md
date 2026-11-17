@@ -1,22 +1,41 @@
 # Unreel
 
-Instagram without the Reels feed. Unreel shows instagram.com in a native iOS app and filters it as it loads:
+Instagram for messaging, with browsing on a short leash. Unreel shows instagram.com in a native iOS app and changes it as it loads.
+
+## Limits
+
+Messages are always open and never counted. Everything else (feed, search, profiles, stories) is "browsing", and browsing only happens in a timed session you start on purpose.
+
+- **Gate.** Leaving Messages shows a full screen with today's numbers, the last seven days, and a pause (5 s, longer with each session that day) before "Browse for 5 min" unlocks. The Messages button works immediately.
+- **Sessions.** A thin bar at the top drains while a session runs and turns red for the last 30 seconds. When it ends the screen locks, with one "30 more seconds" to finish what you were typing.
+- **Break.** A wait between sessions (10 min by default) with a countdown.
+- **Daily time.** A total for the day (20 min by default). The last session is shortened to fit; after that only Messages work until 4 AM.
+- **Quiet hours** and **Messages only** switch browsing off on a schedule or completely.
+- **Free passes.** A post, reel or story a friend sends you opens from the chat without a session. Wandering off from it is browsing.
+- **Fade color** (optional) drains the color from photos and videos through the second half of the daily time.
+- **Strict mode** (optional) makes Filters wait 30 seconds before limits or filters can be changed.
+- **Open to Messages** (optional) starts the app in your inbox instead of where you left off.
+
+The day's numbers are kept both in the page and in the app, so Reset Cache or a reload can't hand time back.
+
+## Filters
 
 - The Reels tab is hidden, and visiting /reels/ redirects to your DMs.
 - Reels (any video post) and ads are removed from the home feed; the feed ends with an "all caught up" card instead of scrolling through blank space.
+- Home can show the Following feed (accounts you follow, newest first), looking exactly like the normal feed.
 - Reels your friends send in DMs still play, one at a time. Swiping to another Reel sends you back to the chat.
-- The Explore grid is hidden while search keeps working (toggle in Filters).
-- Haptic taps when you like a post, double-tap a photo, switch tabs, or swipe a reel closed.
-- No web-style arrows/"Done" bar above the keyboard.
-- Reopens where you left off (except reels and login screens).
-- Long-press the app icon for Messages, New Post, and Filters.
-- Search box on your Story's viewer list.
-- DM notifications come from a small relay on a separate server (Instagram → mautrix-meta bridge → private Matrix → Bark). Tapping one opens that chat in Unreel via `unreel://thread/<id>`. The app itself can't receive pushes on a free Apple ID.
-- Reset Cache button in Filters.
-- Peek: long-press a chat in the inbox to read it without sending "Seen" (banner in the chat has "Mark as read").
-- Filters → Extras: switch the app icon, and a Bio Fonts generator (look-alike Unicode text for your bio).
+- The Explore grid is hidden while search keeps working.
+- Hide your online status and typing indicator. Peek: long-press a chat in the inbox to read it without sending "Seen".
 
-A Shortcuts automation sends taps on the real Instagram icon to Unreel.
+## App feel
+
+- Tab bar and header laid out like the app; haptics; double-tap to like posts and to heart shared posts and reels in chats.
+- Comments open as a sheet over the playing reel, most-liked first.
+- Save to Photos in the ⋯ menu of posts, reels and stories. Long-press for full-size profile pictures and Copy Text.
+- No web-style bar above the keyboard, no white flashes, 120 Hz.
+- Long-press the app icon for Messages, New Post, and Filters. Search box on your Story's viewer list.
+- DM notifications come from a small relay on a separate server (Instagram → mautrix-meta bridge → private Matrix → Bark). Tapping one opens that chat in Unreel via `unreel://thread/<id>`. The app itself can't receive pushes on a free Apple ID.
+- Filters → Extras: switch the app icon, and a Bio Fonts generator.
 
 ## Build without a Mac (GitHub Actions)
 
@@ -66,10 +85,26 @@ There is no on-screen bar. Open Filters by shaking the phone, or by long-pressin
 
 | File | Role |
 |---|---|
-| `WebViewStore.swift` | Sets up the WKWebView: Safari user agent, persistent login, and filter injection. It blocks `instagram://` handoffs, which would otherwise loop back through the automation, and opens external links in Safari. |
-| `filter.js` | Hooks `history.pushState`, `replaceState` and `popstate` to catch Instagram's in-page navigation. Redirects blocked paths, hides Reels nav links and feed posts that link to `/reel/`, and tracks which single Reel was opened from a DM. |
-| `FilterSettings.swift` | Stores the toggles and passes them to the script as `window.__UNREEL__`. |
+| `WebViewStore.swift` | Sets up the WKWebView: Safari user agent, persistent login, and script injection at document start (settings, then `limits.js`, then `filter.js`). It blocks `instagram://` handoffs and opens external links in Safari. |
+| `Resources/limits.js` | The gate, sessions, breaks, daily time, quiet hours and the session timer. Decides from the page address whether you are in Messages (free) or browsing. |
+| `Resources/filter.js` | Hooks Instagram's in-page navigation, hides Reels and ads, ends the feed, and adds the app-like tab bar, header, comments sheet, Peek and the rest. |
+| `FilterSettings.swift` | Stores every setting and passes it to the scripts as `window.__UNREEL__`. |
+| `UsageSummary.swift` | Keeps the app's copy of the day's browsing numbers and hands it back to `limits.js`. |
 | `SettingsView.swift` / `SetupGuideView.swift` | The Filters screen and the Shortcuts setup guide. |
+
+## Tests
+
+```
+cd tests
+npm install
+npx playwright install chromium
+npm test
+```
+
+- `limits.test.js` runs `limits.js` (with `filter.js` loaded beside it) in Chromium against a mock page with a controllable clock: the gate, pause, sessions, breaks, daily time, the 4 AM rollover, quiet hours, free passes, saved numbers and merging.
+- `filter.test.js` runs each script in `tests/filter/` (a mock Instagram page in jsdom exercising one behaviour of `filter.js`) and compares its output with the known-good output in `tests/filter/expected/`. After an intended change, run `node filter.test.js --update` and review the diff.
+
+GitHub Actions runs both on every push (`.github/workflows/test.yml`). The tests use mock pages, so they catch broken logic, not changes Instagram makes to its site.
 
 ## Maintenance
 

@@ -1,0 +1,13 @@
+feed: video slot hidden = false
+feed: ad slot hidden    = false
+feed: normal visible    = true
+header: brand/newpost tagged = true true
+header: newpost is plus wrapper = true not heart: true
+errors (feed): []
+settings off: video visible = true ad visible = true
+inbox status: Sent 1h ago | other: null
+errors (inbox): []
+errors (stories): []
+dm: img sizes = null
+errors (dm): []
+Error: Not implemented: navigation (except hash changes)

@@ -1,0 +1,2 @@
+first double-tap hearts: true
+second double-tap removes it: true | reel opened: 0 | haptics: medium,light []

@@ -1,0 +1,6 @@
+reel below the screen hidden: false
+ad below the screen hidden:   false
+reel already on screen kept:  true
+normal post kept:             true
+seen post that gains a video stays: true
+errors: []

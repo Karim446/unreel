@@ -1,0 +1,5 @@
+post menu items: [ 'Save to Photos', 'Report', 'Unfollow', 'Copy link', 'Cancel' ]
+  saved: [{"url":"https://cdn/big.jpg","video":false}]
+holding a story opens no menu: true
+arrow rule present & matches: true
+errors: []

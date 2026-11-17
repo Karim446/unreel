@@ -1,0 +1,7 @@
+light: html painted with old dark color? (none)
+light: theme reported to app: [ 'rgb(255, 255, 255)' ]
+light: bar bg = rgb(255, 255, 255) | icon color = rgb(0, 0, 0) | scheme = light
+light inbox: bar bg = rgb(255, 255, 255) | cutout stroke = rgb(255, 255, 255)
+errors: []
+switched to dark: bar bg = rgb(12, 16, 20) | icon color = rgb(245, 245, 245) | errors: []
+Error: Not implemented: navigation (except hash changes)

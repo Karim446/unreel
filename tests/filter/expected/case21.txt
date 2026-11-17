@@ -1,0 +1,9 @@
+photo long-press opens no menu (saving is in the ⋯ menu now): true
+avatar long-press menu: [ 'View Profile Picture', 'Cancel' ]
+  viewer shows: https://cdn/hd.jpg
+caption long-press menu: [ 'Copy Text', 'Cancel' ]
+  copied: ["great day at the beach"]
+quick tap opens no menu: true
+hideOnline=false hideTyping=true: typing sent=false active sent=true
+hideOnline=true hideTyping=false: typing sent=true active sent=false
+errors: []

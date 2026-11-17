@@ -1,0 +1,9 @@
+mid-feed: not ended: true
+ended: card inside the feed (scrolls with it): true
+feed trimmed just below last post: true 1430px (expected 1430px = 1200 + 230)
+trim restored after a redraw: true
+script never moved the scroll position: true
+card is not a floating overlay: true
+leaving feed restores it: true
+errors: []
+Error: Not implemented: navigation (except hash changes)

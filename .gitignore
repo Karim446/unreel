@@ -1,0 +1,7 @@
+Unreel.xcodeproj/
+build/
+build.log
+Payload/
+*.ipa
+node_modules/
+.DS_Store

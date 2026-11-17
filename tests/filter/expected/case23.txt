@@ -1,0 +1,2 @@
+double-tap: hearted = true | reel opened = 0 | haptic = medium []
+single tap: reel opened = 1 | hearted = false

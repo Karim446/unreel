@@ -1,0 +1,3 @@
+swipe down on the comments closes them: true
+the reel (and chat) are still open: /direct/t/1/
+errors: []

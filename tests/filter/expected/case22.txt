@@ -1,0 +1,2 @@
+Following on: switched to /?variant=following | menu left open: false []
+Following off: stays on /

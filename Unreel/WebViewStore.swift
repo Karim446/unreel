@@ -1,8 +1,9 @@
 import AVFoundation
 import UIKit
+import UserNotifications
 import WebKit
 
-/// Owns the single WKWebView that shows instagram.com with filter.js injected.
+/// Owns the single WKWebView that shows instagram.com with limits.js and filter.js injected.
 @MainActor
 final class WebViewStore: NSObject, ObservableObject, WKNavigationDelegate, WKUIDelegate, WKScriptMessageHandler {
     static let home = URL(string: "https://www.instagram.com/")!
@@ -23,11 +24,10 @@ final class WebViewStore: NSObject, ObservableObject, WKNavigationDelegate, WKUI
     var inChat: Bool { path.hasPrefix("/direct/t/") }
 
     private let filterSource: String
+    private let limitsSource: String
     private var appliedConfig: String?
     private let refreshControl = UIRefreshControl()
     private var urlObserver: NSKeyValueObservation?
-    private var pageDataTimer: Timer?
-    static weak var current: WebViewStore?
     private var jsAfterLoad: [String] = []
 
     override init() {
@@ -43,6 +43,8 @@ final class WebViewStore: NSObject, ObservableObject, WKNavigationDelegate, WKUI
 
         filterSource = Bundle.main.url(forResource: "filter", withExtension: "js")
             .flatMap { try? String(contentsOf: $0, encoding: .utf8) } ?? ""
+        limitsSource = Bundle.main.url(forResource: "limits", withExtension: "js")
+            .flatMap { try? String(contentsOf: $0, encoding: .utf8) } ?? ""
 
         pageColor = Self.savedPageColor() ?? .systemBackground
 
@@ -54,8 +56,7 @@ final class WebViewStore: NSObject, ObservableObject, WKNavigationDelegate, WKUI
         webView.configuration.userContentController.add(self, name: "unread")
         webView.configuration.userContentController.add(self, name: "copyText")
         webView.configuration.userContentController.add(self, name: "saveMedia")
-        webView.configuration.userContentController.add(self, name: "siteDmBadge")
-        webView.configuration.userContentController.add(self, name: "unreelDiag")
+        webView.configuration.userContentController.add(self, name: "limits")
         webView.hideKeyboardAccessoryBar()
         webView.customUserAgent = Self.safariUA
         // WebKit's built-in back swipe shows a snapshot of the previous page, and for
@@ -85,32 +86,35 @@ final class WebViewStore: NSObject, ObservableObject, WKNavigationDelegate, WKUI
             Task { @MainActor in Self.rememberLocation(wv.url) }
         }
 
-        // Unread count and who's online, fetched by the app (the page itself can't
-        // reach the address that answers these) and handed to the page.
-        // (Disabled: Instagram refuses these requests from outside its own app,
-        // answering "Prompt has contribution". Kept for reference.)
-        WebViewStore.current = self
-
         // Never leave the screen blank if the first load stalls.
         DispatchQueue.main.asyncAfter(deadline: .now() + 8) { [weak self] in self?.hasLoaded = true }
     }
 
-    /// Installs the filter script with current settings. Reloads only if settings changed.
+    /// Installs the page scripts with current settings. Reloads only if settings changed.
     func apply(_ settings: FilterSettings, reloadIfChanged: Bool) {
         let config = settings.jsConfig
         guard config != appliedConfig else { return }
         appliedConfig = config
+        installScripts(config: config)
+        if reloadIfChanged { webView.reload() }
+    }
 
+    /// Three scripts run before anything on the page, in this order: the
+    /// settings and saved numbers, then limits.js, then filter.js. They are
+    /// separate so a problem in one can never stop the others.
+    private func installScripts(config: String) {
         // Last known Instagram background, so the page never starts out white.
         let bg = UserDefaults.standard.string(forKey: Self.pageColorKey(for: UITraitCollection.current))
             .map { "window.__UNREEL_BG__ = \"\($0)\";" } ?? ""
 
         let ucc = webView.configuration.userContentController
         ucc.removeAllUserScripts()
-        ucc.addUserScript(WKUserScript(source: config + "\n" + bg + "\n" + filterSource,
-                                       injectionTime: .atDocumentStart,
-                                       forMainFrameOnly: true))
-        if reloadIfChanged { webView.reload() }
+        let sources = [config + "\n" + bg + "\n" + UsageSummary.script(), limitsSource, filterSource]
+        for source in sources {
+            ucc.addUserScript(WKUserScript(source: source,
+                                           injectionTime: .atDocumentStart,
+                                           forMainFrameOnly: true))
+        }
     }
 
     func loadHome() { webView.load(URLRequest(url: Self.home)) }
@@ -120,7 +124,12 @@ final class WebViewStore: NSObject, ObservableObject, WKNavigationDelegate, WKUI
     private static let resumeKey = "resumeURL"
 
     /// Loads the last page you were on, or the feed if there isn't one.
-    func loadLastLocation() {
+    /// With "Open to Messages" on, always starts in the inbox instead.
+    func loadLastLocation(startInMessages: Bool = false) {
+        if startInMessages {
+            webView.load(URLRequest(url: URL(string: "direct/inbox/", relativeTo: Self.home)!))
+            return
+        }
         let saved = UserDefaults.standard.url(forKey: Self.resumeKey)
         webView.load(URLRequest(url: saved ?? Self.home))
     }
@@ -134,50 +143,7 @@ final class WebViewStore: NSObject, ObservableObject, WKNavigationDelegate, WKUI
         UserDefaults.standard.set(url, forKey: resumeKey)
     }
 
-    // MARK: Notifications and maintenance
-
-    func pushPageData() async {
-        guard UIApplication.shared.applicationState == .active else { return }
-        await probeInboxFromPage()
-        let data = await MessageNotifier.shared.fetchForPage()
-        var js = ""
-        if let unread = data.unread {
-            js += "window.__unreel && window.__unreel.setUnread(\(unread));"
-            MessageNotifier.shared.setAppBadge(unread)
-        }
-        if let presence = data.presence,
-           let json = try? JSONSerialization.data(withJSONObject: presence),
-           let text = String(data: json, encoding: .utf8) {
-            js += "window.__unreel && window.__unreel.setPresence(\(text));"
-        }
-        if !js.isEmpty { _ = try? await webView.evaluateJavaScript(js) }
-    }
-
-    /// Asks for the inbox from inside the page itself (exactly as Instagram's site
-    /// would) and records what came back, so we can tell which way works.
-    func probeInboxFromPage() async {
-        let js = """
-        try {
-          const csrf = (document.cookie.match(/csrftoken=([^;]+)/) || [])[1] || '';
-          const r = await fetch('/api/v1/direct_v2/inbox/?limit=1', { credentials: 'include', headers: {
-            'x-ig-app-id': '936619743392459', 'x-requested-with': 'XMLHttpRequest', 'x-csrftoken': csrf,
-            'x-ig-www-claim': sessionStorage.getItem('www-claim-v2') || '0', 'x-asbd-id': '129477' } });
-          const t = await r.text();
-          return r.status + ' ' + t.slice(0, 60).replace(/\\s+/g, ' ');
-        } catch (e) { return 'error ' + e; }
-        """
-        let result = try? await webView.callAsyncJavaScript(js, arguments: [:], in: nil, in: .page)
-        if let text = result as? String { MessageNotifier.shared.pageProbe = text }
-    }
-
-    /// Reads Instagram's www-claim value the page captured, for background checks.
-    func readClaim() async -> String? {
-        let js = "sessionStorage.getItem('www-claim-v2') || localStorage.getItem('unreel-www-claim') || ''"
-        let result = try? await webView.evaluateJavaScript(js)
-        let claim = result as? String
-        if let claim, !claim.isEmpty { MessageNotifier.shared.updateClaim(claim) }
-        return claim
-    }
+    // MARK: Opening chats and maintenance
 
     func openThread(_ id: String) {
         webView.load(URLRequest(url: URL(string: "direct/t/\(id)/", relativeTo: Self.home)!))
@@ -196,7 +162,9 @@ final class WebViewStore: NSObject, ObservableObject, WKNavigationDelegate, WKUI
                 for key in ["pageColorCSS-dark", "pageColorCSS-light", "resumeURL"] {
                     UserDefaults.standard.removeObject(forKey: key)
                 }
-                self?.appliedConfig = nil
+                // Put the scripts back with the day's saved numbers, so clearing the
+                // page's storage doesn't hand back browsing time already used.
+                if let config = self?.appliedConfig { self?.installScripts(config: config) }
                 self?.loadHome()
             }
         }
@@ -300,12 +268,8 @@ final class WebViewStore: NSObject, ObservableObject, WKNavigationDelegate, WKUI
         if message.name == "haptic", let style = message.body as? String {
             return Haptics.play(style)
         }
-        if message.name == "unreelDiag", let detail = message.body as? String {
-            MessageNotifier.shared.bridgeStatus = detail
-            return
-        }
-        if message.name == "siteDmBadge", let present = message.body as? Bool {
-            MessageNotifier.shared.observeSiteDmBadge(present)
+        if message.name == "limits", let json = message.body as? String {
+            UsageSummary.store(json)   // today's browsing numbers, kept outside the page
             return
         }
         if message.name == "saveMedia", let body = message.body as? [String: Any], let url = body["url"] as? String {
@@ -323,19 +287,13 @@ final class WebViewStore: NSObject, ObservableObject, WKNavigationDelegate, WKUI
             return
         }
         if message.name == "unread", let count = message.body as? Int {
-            MessageNotifier.shared.bridgeStatus = "Swift received unread count: \(count)"
-            MessageNotifier.shared.setAppBadge(count)
-            MessageNotifier.shared.observeLiveUnreadCount(count)
+            UNUserNotificationCenter.current().setBadgeCount(max(0, count)) { _ in }   // number on the app icon
             return
         }
         if message.name == "route", let newPath = message.body as? String {
             if newPath != path {
                 let wasInChat = inChat
                 path = newPath
-                // Reading a chat here clears its notifications.
-                if let thread = newPath.split(separator: "/").dropFirst(2).first, newPath.hasPrefix("/direct/t/") {
-                    MessageNotifier.shared.clearNotifications(forThread: String(thread))
-                }
                 webView.scrollView.isScrollEnabled = !inChat
                 webView.scrollView.refreshControl = inChat ? nil : refreshControl
                 if wasInChat && !inChat {

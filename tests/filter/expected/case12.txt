@@ -1,0 +1,3 @@
+on home:    home-filled search-outline dm-outline
+on search:  home-outline search-bold dm-outline
+on inbox:   home-outline search-outline dm-outline | errors: []
