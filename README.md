@@ -2,6 +2,55 @@
 
 Instagram for messaging, with browsing on a short leash. Unreel shows instagram.com in a native iOS app and changes it as it loads.
 
+## Install with SideStore (recommended)
+
+You don't need a Mac or a paid developer account. GitHub builds the app, and SideStore signs it on your iPhone with your own Apple ID. A computer is needed once, to put SideStore on the phone; after that everything happens on the iPhone.
+
+### 1. Get the IPA
+
+Every push to `main` builds `Unreel.ipa` on GitHub Actions (`.github/workflows/build.yml`). To start one by hand: Actions → Build IPA → Run workflow.
+
+1. Open the repo's **Actions** tab, pick the latest green **Build IPA** run, and download **Unreel-ipa** under Artifacts. You have to be signed in to GitHub, and this works from Safari on the iPhone too.
+2. The download is a zip. Open it in the Files app (or extract it on a computer) to get `Unreel.ipa`.
+3. Put `Unreel.ipa` somewhere the iPhone can reach: Downloads in Files, iCloud Drive or AirDrop.
+
+The run number on GitHub is the **Build** number shown at the bottom of Filters, so you can always check which version is installed.
+
+### 2. Set up SideStore (one time)
+
+Full official guide: [sidestore.io](https://sidestore.io). In short:
+
+1. **iPhone:** install **LocalDevVPN** from the App Store, open it and tap Connect (allow the VPN configuration).
+2. **Windows PC:** install iTunes from Apple's website (the Microsoft Store version can cause problems) so the PC can see the phone, then install **iloader** (`iloader-windows-x64.msi`) from [github.com/nab138/iloader/releases](https://github.com/nab138/iloader/releases). 64-bit Windows only.
+3. Plug the iPhone in with a cable, tap **Trust** on the phone, open iloader, sign in with your Apple ID, and choose **Install SideStore (Stable)**.
+4. **iPhone:** Settings → General → VPN & Device Management → trust your Apple ID's developer profile. On iOS 16 and later, also turn on Settings → Privacy & Security → **Developer Mode** (the phone restarts).
+5. Open SideStore with LocalDevVPN connected, sign in with the same Apple ID, and allow local network access.
+
+### 3. Install Unreel
+
+1. Connect LocalDevVPN.
+2. In SideStore, go to **My Apps**, tap **+**, and choose `Unreel.ipa`.
+3. Open Unreel and log in to Instagram (see First launch below).
+
+To **update**, download the new IPA and install it the same way. It replaces the old version, and your Instagram login and today's browsing numbers are kept.
+
+### 4. Keep it running (7-day refresh)
+
+Apps signed with a free Apple ID stop opening after 7 days unless they're refreshed.
+
+- SideStore refreshes in the background while **LocalDevVPN stays connected**. Leave it on.
+- To refresh by hand: connect LocalDevVPN, open SideStore → My Apps, and tap the days counter (or Refresh All).
+- For extra safety, add a personal automation in Shortcuts (for example daily at a fixed time) that runs SideStore's **Refresh All Apps** action.
+- If SideStore itself has expired and won't open, plug the phone in and reinstall it with iloader. Apps you installed through it stay.
+
+Free Apple IDs are limited to **3 sideloaded apps at once** (SideStore counts as one) and 10 new app IDs per week, so avoid installing and deleting lots of apps. SideStore changes the bundle ID to match your account automatically; you don't need to edit `project.yml`.
+
+### If something goes wrong
+
+- **Install spins forever:** LocalDevVPN isn't connected, or the Wi-Fi blocks local VPN traffic. Reconnect LocalDevVPN and try again on a different network.
+- **"Unable to verify app" / app won't open:** it expired. Refresh in SideStore.
+- **New features don't show up:** check the Build number in Filters against the Actions run number. If it's older, the new IPA wasn't installed.
+
 ## Limits
 
 Messages are always open and never counted. Everything else (feed, search, profiles, stories) is "browsing", and browsing only happens in a timed session you start on purpose.
@@ -37,39 +86,9 @@ The day's numbers are kept both in the page and in the app, so Reset Cache or a 
 - DM notifications come from a small relay on a separate server (Instagram → mautrix-meta bridge → private Matrix → Bark). Tapping one opens that chat in Unreel via `unreel://thread/<id>`. The app itself can't receive pushes on a free Apple ID.
 - Filters → Extras: switch the app icon, and a Bio Fonts generator.
 
-## Build without a Mac (GitHub Actions)
-
-Push this folder to a GitHub repo on the `main` branch. The workflow in `.github/workflows/build.yml` builds an unsigned `Unreel.ipa` on a macOS runner. Download it from Actions → latest run → Artifacts (it arrives zipped), then install it with SideStore, which signs it with your Apple ID. You can also start a build manually from Actions → Build IPA → Run workflow.
-
-## Build on a Mac (Xcode 15+)
-
-### Option A: XcodeGen
-
-```
-brew install xcodegen
-cd Unreel
-xcodegen generate
-open Unreel.xcodeproj
-```
-
-### Option B: manual
-
-1. In Xcode, choose New Project → iOS App, name it "Unreel", select SwiftUI, and use Swift 5 language mode.
-2. Delete the generated ContentView.swift and UnreelApp.swift.
-3. Drag everything in `Unreel/` into the project, and make sure `filter.js` is checked for the Unreel target.
-
-### Install on your iPhone
-
-1. In Signing & Capabilities, pick your team. A free Apple ID works.
-2. Change the bundle ID from `com.yourname.unreel` to your own.
-3. Plug in your phone, select it as the run destination, and press Run.
-4. On the phone, go to Settings → General → VPN & Device Management and trust your developer profile.
-
-Builds signed with a free Apple ID expire after 7 days, so you re-run from Xcode to renew. A paid developer account ($99/yr) extends that to a year and allows TestFlight.
-
 ## App icon
 
-Replace `Unreel/Assets.xcassets/AppIcon.appiconset/AppIcon.png` with any 1024×1024 PNG with no transparency, keeping the same file name. Push, download the new IPA, and reinstall it through SideStore. Your login is kept.
+Replace `Unreel/Assets.xcassets/AppIcon.appiconset/AppIcon.png` with any 1024×1024 PNG with no transparency, keeping the same file name. Push, then install the new IPA through SideStore. Your login is kept. (You can also switch between the built-in icons in Filters → Extras → App Icon.)
 
 ## Hidden settings
 
@@ -80,6 +99,18 @@ There is no on-screen bar. Open Filters by shaking the phone, or by long-pressin
 1. Log in to Instagram inside Unreel. The session persists between launches.
 2. Follow the in-app redirect guide to set up the Shortcuts automation (Instagram "Is Opened" → Open URLs: `unreel://inbox` → Run Immediately). Tapping an Instagram notification then lands you in your DM inbox.
 3. To hide the real app but keep its notifications, long-press it and choose Remove App → **Remove from Home Screen**. It stays in the App Library. Don't use Hide or a Screen Time limit: both silence notifications.
+
+## Building on a Mac (alternative)
+
+Only needed if you'd rather build and install with Xcode 15+ instead of GitHub Actions and SideStore.
+
+```
+brew install xcodegen
+xcodegen generate
+open Unreel.xcodeproj
+```
+
+In Signing & Capabilities, pick your team (a free Apple ID works) and change the bundle ID from `com.yourname.unreel` to your own. Select your iPhone as the run destination and press Run, then trust the developer profile on the phone (Settings → General → VPN & Device Management). Builds with a free Apple ID still expire after 7 days; a paid developer account ($99/yr) extends that to a year.
 
 ## How it works
 
